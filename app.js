@@ -2,7 +2,7 @@
 
 const WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_API_URL = "https://nominatim.openstreetmap.org";
-const FORECAST_HOURS = 12;
+const FORECAST_HOURS = 8;
 const API_TIMEOUT_MS = 12000;
 
 const CLOTHING_TIERS = [
@@ -214,7 +214,7 @@ function normalizeWeatherResponse(data) {
 
 	if (hourly.length < FORECAST_HOURS) {
 		throw new Error(
-			"A complete 12-hour forecast is not available yet.",
+			"A complete 8 hour forecast is not available yet.",
 		);
 	}
 
@@ -322,7 +322,7 @@ function setAppStatus(message) {
 	elements.status.textContent = message;
 }
 
-function renderLoading(message = "Reading the next 12 hours...") {
+function renderLoading(message = "Reading the next 8 hours...") {
 	state.topTier = null;
 	state.weather = null;
 	document.body.dataset.view = "loading";

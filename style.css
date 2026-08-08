@@ -84,7 +84,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
     font: inherit;
     letter-spacing: 0;
 }
@@ -318,6 +319,54 @@ main {
 .recommendation-copy {
     grid-area: copy;
     min-width: 0;
+}
+
+.horizon-control {
+    display: none;
+    align-items: center;
+    gap: var(--space-2);
+    width: fit-content;
+    min-height: 44px;
+}
+
+body[data-view="ready"] #hero-eyebrow {
+    display: none;
+}
+
+body[data-view="ready"] .horizon-control {
+    display: flex;
+}
+
+.horizon-control .eyebrow {
+    margin: 0;
+}
+
+.best-next {
+    position: relative;
+    display: inline-grid;
+    align-items: center;
+}
+
+.best-next select {
+    min-height: 44px;
+    padding: 0 var(--space-6) 0 0;
+    color: var(--color-text-strong);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    appearance: none;
+    cursor: pointer;
+    font-size: 0.8125rem;
+    font-weight: 700;
+}
+
+.best-next svg {
+    position: absolute;
+    right: 0;
+    width: 16px;
+    height: 16px;
+    color: var(--color-accent-strong);
+    pointer-events: none;
 }
 
 .eyebrow {
@@ -837,6 +886,7 @@ body[data-view="error"] .garment-mark {
             "retry retry";
         gap: var(--space-5);
         min-height: 360px;
+        padding-inline: 0;
         padding-block: var(--space-5);
     }
 

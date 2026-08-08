@@ -54,6 +54,7 @@ const CLOTHING_TIERS = [
 ];
 
 const state = {
+	forecastHours: FORECAST_HOURS,
 	location: null,
 	locationRevision: 0,
 	searchResults: [],
@@ -103,8 +104,8 @@ function getHourWeight(index) {
 	return 0.4;
 }
 
-function calculateTierScores(hourlyData) {
-	const hours = hourlyData.slice(0, FORECAST_HOURS);
+function calculateTierScores(hourlyData, forecastHours = FORECAST_HOURS) {
+	const hours = hourlyData.slice(0, forecastHours);
 
 	if (hours.length === 0) {
 		throw new Error("Hourly forecast data is unavailable.");
@@ -351,37 +352,41 @@ function renderError(message) {
 	setAppStatus(message);
 }
 
-function getRecommendationReason(weather, rainRisk) {
-	const nextSixHours = weather.hourly.slice(0, 6);
-	const strongestWind = Math.max(
-		...weather.hourly.map((hour) => hour.windSpeed),
-	);
+function formatForecastWindow(forecastHours) {
+	return forecastHours === 1
+		? "the next hour"
+		: `the next ${forecastHours} hours`;
+}
+
+function getRecommendationReason(weather, rainRisk, forecastHours) {
+	const hours = weather.hourly.slice(0, forecastHours);
+	const forecastWindow = formatForecastWindow(forecastHours);
+	const strongestWind = Math.max(...hours.map((hour) => hour.windSpeed));
 	const temperatureChange =
-		weather.hourly[weather.hourly.length - 1].feelsLike -
-		weather.hourly[0].feelsLike;
+		hours[hours.length - 1].feelsLike - hours[0].feelsLike;
 
 	if (rainRisk) {
-		return "Rain is likely within the next 6 hours.";
+		return `Rain is likely within ${formatForecastWindow(Math.min(forecastHours, 6))}.`;
 	}
 	if (strongestWind > 20) {
-		return `Wind reaches ${Math.round(strongestWind)} km/h today.`;
+		return `Wind reaches ${Math.round(strongestWind)} km/h within ${forecastWindow}.`;
 	}
 	if (temperatureChange <= -4) {
-		return "It will feel noticeably cooler later.";
+		return `It will feel noticeably cooler within ${forecastWindow}.`;
 	}
 	if (temperatureChange >= 4) {
-		return "It will feel noticeably warmer later.";
+		return `It will feel noticeably warmer within ${forecastWindow}.`;
 	}
-	if (nextSixHours.every((hour) => hour.precipitationProbability < 20)) {
-		return "Conditions stay settled for the next 12 hours.";
+	if (hours.every((hour) => hour.precipitationProbability < 20)) {
+		return `Conditions stay settled for ${forecastWindow}.`;
 	}
-	return "Conditions remain fairly steady through the day.";
+	return `Conditions remain fairly steady for ${forecastWindow}.`;
 }
 
 function announceRecommendation(topTier) {
 	const locationLabel = state.location?.label ?? "your location";
 	setAppStatus(
-		`${topTier.label} is the top recommendation for ${locationLabel} at ${topTier.score} percent acceptance.`,
+		`For ${locationLabel}, ${topTier.label} is the top recommendation for ${formatForecastWindow(state.forecastHours)}, with ${topTier.score} percent acceptance.`,
 	);
 }
 
@@ -457,7 +462,10 @@ function createForecastElement(hour, index) {
 }
 
 function renderWeather(weather) {
-	const { rainRisk, scores } = calculateTierScores(weather.hourly);
+	const { rainRisk, scores } = calculateTierScores(
+		weather.hourly,
+		state.forecastHours,
+	);
 	const topTier = selectTopTier(scores);
 	const currentDescriptor = getWeatherDescriptor(
 		weather.current.weatherCode,
@@ -468,7 +476,7 @@ function renderWeather(weather) {
 	document.body.dataset.view = "ready";
 	document.body.dataset.recommendation = topTier.id;
 	elements.retryButton.hidden = true;
-	elements.heroEyebrow.textContent = "Best fit for the next 12 hours";
+	elements.heroEyebrow.textContent = "Top recommendation";
 	elements.heroTitle.textContent = topTier.label;
 	elements.heroScore.textContent = String(topTier.score);
 	elements.heroScoreLabel.textContent = "% acceptance";
@@ -476,6 +484,7 @@ function renderWeather(weather) {
 	elements.heroReason.textContent = getRecommendationReason(
 		weather,
 		rainRisk,
+		state.forecastHours,
 	);
 	elements.currentCondition.textContent = currentDescriptor.label;
 	elements.currentTemperature.textContent = `${Math.round(weather.current.temperature)}\u00B0`;
@@ -740,6 +749,24 @@ function toggleTheme() {
 	themeColor.content = state.theme === "dark" ? "#171614" : "#f3f1ec";
 }
 
+function handleForecastHoursChange(event) {
+	const forecastHours = Number(event.currentTarget.value);
+
+	if (
+		!Number.isInteger(forecastHours) ||
+		forecastHours < 1 ||
+		forecastHours > FORECAST_HOURS
+	) {
+		event.currentTarget.value = String(state.forecastHours);
+		return;
+	}
+
+	state.forecastHours = forecastHours;
+	if (state.weather) {
+		renderWeather(state.weather);
+	}
+}
+
 function cacheDomElements() {
 	Object.assign(elements, {
 		closeLocationButton: document.querySelector("#close-location"),
@@ -750,6 +777,7 @@ function cacheDomElements() {
 			"#current-temperature",
 		),
 		currentWind: document.querySelector("#current-wind"),
+		forecastHours: document.querySelector("#forecast-hours"),
 		forecastList: document.querySelector("#forecast-list"),
 		heroEyebrow: document.querySelector("#hero-eyebrow"),
 		heroMonogram: document.querySelector("#hero-monogram"),
@@ -780,6 +808,10 @@ function cacheDomElements() {
 }
 
 function bindEvents() {
+	elements.forecastHours.addEventListener(
+		"change",
+		handleForecastHoursChange,
+	);
 	elements.locationButton.addEventListener("click", openLocationDialog);
 	elements.closeLocationButton.addEventListener(
 		"click",

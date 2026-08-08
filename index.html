@@ -75,6 +75,31 @@
 
                 <div class="recommendation-copy">
                     <p class="eyebrow" id="hero-eyebrow">Forecast in progress</p>
+                    <div class="horizon-control">
+                        <label class="eyebrow" id="best-next-eyebrow" for="forecast-hours">
+                            Best fit for the next
+                        </label>
+                        <span class="best-next">
+                            <select id="forecast-hours" name="forecast-hours">
+                                <option value="1">1 hour</option>
+                                <option value="2">2 hours</option>
+                                <option value="3">3 hours</option>
+                                <option value="4">4 hours</option>
+                                <option value="5">5 hours</option>
+                                <option value="6">6 hours</option>
+                                <option value="7">7 hours</option>
+                                <option value="8">8 hours</option>
+                                <option value="9">9 hours</option>
+                                <option value="10">10 hours</option>
+                                <option value="11">11 hours</option>
+                                <option value="12" selected>12 hours</option>
+                            </select>
+                            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="m6 9 6 6 6-6" />
+                            </svg>
+                        </span>
+                    </div>
                     <h1 id="hero-title">Looking outside</h1>
                     <p class="recommendation-reason" id="hero-reason">
                         Waiting for location permission...
@@ -97,7 +122,6 @@
                     Try again
                 </button>
             </section>
-
             <section class="current-conditions" aria-label="Current conditions">
                 <dl>
                     <div>

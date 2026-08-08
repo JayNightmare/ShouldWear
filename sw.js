@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const STATIC_CACHE = `shouldwear-static-${CACHE_VERSION}`;
 const API_CACHE = `shouldwear-api-${CACHE_VERSION}`;
 const CURRENT_CACHES = new Set([STATIC_CACHE, API_CACHE]);

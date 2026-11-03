@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const STATIC_CACHE = `shouldwear-static-${CACHE_VERSION}`;
 const API_CACHE = `shouldwear-api-${CACHE_VERSION}`;
 const CURRENT_CACHES = new Set([STATIC_CACHE, API_CACHE]);
@@ -8,6 +8,7 @@ const APP_SHELL = [
 	"./",
 	"./index.html",
 	"./style.css",
+	"./core.js",
 	"./app.js",
 	"./manifest.json",
 	"./icons/icon-192.svg",
@@ -17,7 +18,8 @@ const API_ORIGINS = new Set([
 	"https://api.open-meteo.com",
 	"https://nominatim.openstreetmap.org",
 ]);
-const FONT_HOSTS = new Set(["api.fontshare.com", "cdn.fontshare.com"]);
+const WEATHER_ORIGIN = "https://api.open-meteo.com";
+const NETWORK_TIMEOUT_MS = 5000;
 
 self.addEventListener("install", (event) => {
 	event.waitUntil(
@@ -52,15 +54,51 @@ self.addEventListener("activate", (event) => {
 	);
 });
 
+// Stamp a stored copy so the page can show when the data was fetched.
+async function withTimestamp(response) {
+	const headers = new Headers(response.headers);
+	headers.set("x-sw-cached-at", String(Date.now()));
+	return new Response(await response.blob(), {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
+async function storeLatest(cache, request, response, isWeather) {
+	if (isWeather) {
+		// Only the most recent forecast is kept.
+		const keys = await cache.keys();
+		await Promise.all(
+			keys
+				.filter((key) => new URL(key.url).origin === WEATHER_ORIGIN)
+				.map((key) => cache.delete(key)),
+		);
+	}
+	await cache.put(request, await withTimestamp(response));
+}
+
 async function networkFirst(request) {
 	const cache = await caches.open(API_CACHE);
+	const isWeather = new URL(request.url).origin === WEATHER_ORIGIN;
 
-	try {
-		const response = await fetch(request);
+	const network = fetch(request).then(async (response) => {
 		if (response.ok) {
-			await cache.put(request, response.clone());
+			await storeLatest(cache, request, response.clone(), isWeather);
 		}
 		return response;
+	});
+
+	network.catch(() => {});
+
+	// Slow or failed network: answer from cache straight away when possible.
+	const timeout = new Promise((resolve) =>
+		setTimeout(() => resolve(cache.match(request)), NETWORK_TIMEOUT_MS),
+	);
+
+	try {
+		const first = await Promise.race([network, timeout]);
+		return first || (await network);
 	} catch (error) {
 		const cachedResponse = await cache.match(request);
 		if (cachedResponse) {
@@ -107,8 +145,7 @@ self.addEventListener("fetch", (event) => {
 	}
 
 	if (
-		url.origin === self.location.origin ||
-		FONT_HOSTS.has(url.hostname)
+		url.origin === self.location.origin
 	) {
 		event.respondWith(cacheFirst(event.request));
 	}

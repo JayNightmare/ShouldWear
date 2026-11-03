@@ -5,13 +5,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="A 12-hour weather clothing advisor for hoodies, light jumpers, and shirts." />
-    <meta name="theme-color" content="#171614" />
+    <meta name="theme-color" content="#0b0a14" />
     <meta name="color-scheme" content="dark light" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <link rel="preconnect" href="https://api.fontshare.com" />
-    <link rel="preconnect" href="https://cdn.fontshare.com" crossorigin />
-    <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700,900&display=swap" rel="stylesheet" />
+    <link rel="preconnect" href="https://api.open-meteo.com" crossorigin />
     <link rel="manifest" href="./manifest.json" />
     <link rel="icon" href="./icons/icon-192.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./icons/icon-192.svg" />
@@ -33,7 +31,7 @@
                         <path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z" />
                         <circle cx="12" cy="10" r="3" />
                     </svg>
-                    <span id="location-name">Locating...</span>
+                    <span id="location-name" class="mono">Locating...</span>
                 </span>
                 <button class="icon-button" id="location-button" type="button" aria-label="Change location"
                     title="Change location">
@@ -122,6 +120,7 @@
                     Try again
                 </button>
             </section>
+            <p class="offline-badge mono" id="offline-badge" role="status" hidden></p>
             <section class="current-conditions" aria-label="Current conditions">
                 <dl>
                     <div>
@@ -155,12 +154,65 @@
                 <div class="tier-list" id="tier-list"></div>
             </section>
 
+            <section class="alerts" id="alerts" aria-label="Precipitation alerts" hidden>
+                <ul class="alert-list" id="alert-list"></ul>
+                <div class="footwear" id="footwear" role="alert" hidden>
+                    <span class="footwear-icon" aria-hidden="true">&#9888;</span>
+                    <div>
+                        <strong id="footwear-title"></strong>
+                        <p class="mono" id="footwear-detail"></p>
+                    </div>
+                </div>
+            </section>
+
             <section class="forecast" aria-labelledby="forecast-title">
                 <div class="section-heading">
                     <h2 id="forecast-title">Next 12 hours</h2>
                     <span class="forecast-timezone">Local time</span>
                 </div>
                 <ol class="forecast-list" id="forecast-list"></ol>
+            </section>
+
+            <section class="settings" aria-labelledby="settings-title">
+                <details>
+                    <summary id="settings-title">Personalise</summary>
+                    <div class="settings-grid">
+                        <fieldset class="setting">
+                            <legend>Exposure</legend>
+                            <div class="segmented">
+                                <label><input type="radio" name="exposure" value="transit" checked /><span>Transit</span></label>
+                                <label><input type="radio" name="exposure" value="prolonged" /><span>Prolonged Outdoor</span></label>
+                            </div>
+                        </fieldset>
+
+                        <div class="setting">
+                            <label for="thermal-slider">Thermal baseline
+                                <output class="mono" id="thermal-value" for="thermal-slider">0.0&deg;</output>
+                            </label>
+                            <input id="thermal-slider" type="range" min="-5" max="5" step="0.5" value="0" />
+                            <p class="hint"><span>Runs cold</span><span>Runs warm</span></p>
+                        </div>
+
+                        <fieldset class="setting">
+                            <legend>Out of the house</legend>
+                            <div class="time-row">
+                                <label>From <input class="mono" id="out-start" type="time" /></label>
+                                <label>Until <input class="mono" id="out-end" type="time" /></label>
+                            </div>
+                        </fieldset>
+
+                        <fieldset class="setting">
+                            <legend>Wardrobe names</legend>
+                            <div class="label-grid">
+                                <label>Warmest <input type="text" data-tier-label="hoodie" maxlength="24" autocomplete="off" /></label>
+                                <label>Middle <input type="text" data-tier-label="jumper" maxlength="24" autocomplete="off" /></label>
+                                <label>Lightest <input type="text" data-tier-label="shirt" maxlength="24" autocomplete="off" /></label>
+                            </div>
+                        </fieldset>
+                    </div>
+                    <p class="hint">Saved only on this device.</p>
+                    <button class="secondary-button" id="reset-settings" type="button">Reset personalisation</button>
+                </details>
             </section>
         </main>
 
@@ -221,6 +273,7 @@
     </dialog>
 
     <p class="visually-hidden" id="app-status" role="status" aria-live="polite"></p>
+    <script src="./core.js" defer></script>
     <script src="./app.js" defer></script>
 </body>
 

@@ -1,7 +1,19 @@
 {
 	"name": "shouldwear",
+	"displayName": "Should Wear",
+	"description": "A simple app to help you decide what to wear.",
+	"author": {
+		"name": "Jay Bell",
+		"email": "jn3.enquiries@gmail.com",
+		"url": "https://portfolio.nexusgit.info"
+	},
+	"repository": {
+		"url": "https://github.com/JayNightmare/ShouldWear.git",
+		"type": "git"
+	},
 	"private": true,
 	"scripts": {
-		"test": "node --test tests/"
+		"test": "node --test tests/",
+		"start": "open index.html"
 	}
 }

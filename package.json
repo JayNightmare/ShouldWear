@@ -1,0 +1,7 @@
+{
+	"name": "shouldwear",
+	"private": true,
+	"scripts": {
+		"test": "node --test tests/"
+	}
+}

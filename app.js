@@ -1,249 +1,69 @@
 "use strict";
 
+const {
+	FORECAST_HOURS,
+	CLOTHING_TIERS,
+	calculateTierScores,
+	createStorage,
+	debounce,
+	findPrecipitationAlerts,
+	formatTimestamp,
+	getFootwearAdvice,
+	loadSettings,
+	loadWeatherCache,
+	normalizeWeatherResponse,
+	saveSettings,
+	saveWeatherCache,
+	selectTopTier,
+	toFiniteNumber,
+	sanitizeSettings,
+	DEFAULT_LABELS,
+} = window.ShouldWearCore;
+
 const WEATHER_API_URL = "https://api.open-meteo.com/v1/forecast";
 const GEOCODING_API_URL = "https://nominatim.openstreetmap.org";
-const FORECAST_HOURS = 8;
-const API_TIMEOUT_MS = 12000;
+const API_TIMEOUT_MS = 8000;
+const SEARCH_DEBOUNCE_MS = 350;
+const MIN_QUERY_LENGTH = 2;
 
-const CLOTHING_TIERS = [
-	{
-		id: "hoodie",
-		label: "Hoodie",
-		shortLabel: "HD",
-		rainPenalty: 0,
-		windBonus: 15,
-		curve: [
-			[-5, 0],
-			[4, 35],
-			[8, 100],
-			[14, 100],
-			[18, 30],
-			[24, 0],
-		],
-	},
-	{
-		id: "jumper",
-		label: "Light Jumper",
-		shortLabel: "LJ",
-		rainPenalty: 10,
-		windBonus: 8,
-		curve: [
-			[5, 0],
-			[10, 40],
-			[14, 100],
-			[18, 100],
-			[20, 100],
-			[24, 35],
-			[29, 0],
-		],
-	},
-	{
-		id: "shirt",
-		label: "T-Shirt / Shirt only",
-		shortLabel: "TS",
-		rainPenalty: 24,
-		windBonus: 0,
-		curve: [
-			[8, 0],
-			[14, 5],
-			[18, 50],
-			[20, 100],
-			[40, 100],
-		],
-	},
-];
+const storage = createStorage(() => window.localStorage);
 
 const state = {
+	settings: loadSettings(storage),
 	forecastHours: FORECAST_HOURS,
 	location: null,
 	locationRevision: 0,
 	searchResults: [],
-	theme: "dark",
 	topTier: null,
 	weather: null,
+	fetchedAt: null,
+	fromCache: false,
 };
 
 const elements = {};
+const tierRefs = new Map();
+let forecastRefs = [];
+let searchController = null;
+let lastQuery = "";
+const searchCache = new Map();
 
-function clamp(value, minimum = 0, maximum = 100) {
-	return Math.min(maximum, Math.max(minimum, value));
+/* ---------- small DOM helpers ---------- */
+
+function setText(node, text) {
+	if (node.textContent !== text) {
+		node.textContent = text;
+	}
 }
 
-function interpolateScore(temperature, curve) {
-	if (temperature <= curve[0][0]) {
-		return curve[0][1];
-	}
-
-	for (let index = 1; index < curve.length; index += 1) {
-		const [upperTemperature, upperScore] = curve[index];
-		const [lowerTemperature, lowerScore] = curve[index - 1];
-
-		if (temperature <= upperTemperature) {
-			const progress =
-				(temperature - lowerTemperature) /
-				(upperTemperature - lowerTemperature);
-			return (
-				lowerScore +
-				progress * (upperScore - lowerScore)
-			);
-		}
-	}
-
-	return curve[curve.length - 1][1];
+function setAppStatus(message) {
+	setText(elements.status, message);
 }
 
-function getHourWeight(index) {
-	if (index < 3) {
-		return 1;
-	}
-
-	if (index < 6) {
-		return 0.7;
-	}
-
-	return 0.4;
+function persistSettings() {
+	state.settings = saveSettings(storage, state.settings);
 }
 
-function calculateTierScores(hourlyData, forecastHours = FORECAST_HOURS) {
-	const hours = hourlyData.slice(0, forecastHours);
-
-	if (hours.length === 0) {
-		throw new Error("Hourly forecast data is unavailable.");
-	}
-
-	const rainRisk = hours
-		.slice(0, 6)
-		.some((hour) => hour.precipitationProbability > 50);
-
-	const scores = CLOTHING_TIERS.map((tier) => {
-		let weightedScore = 0;
-		let totalWeight = 0;
-
-		hours.forEach((hour, index) => {
-			const weight = getHourWeight(index);
-			let hourlyScore = interpolateScore(
-				hour.feelsLike,
-				tier.curve,
-			);
-
-			if (hour.windSpeed > 20) {
-				hourlyScore += tier.windBonus;
-			}
-
-			if (rainRisk) {
-				hourlyScore -= tier.rainPenalty;
-			}
-
-			weightedScore += clamp(hourlyScore) * weight;
-			totalWeight += weight;
-		});
-
-		return {
-			...tier,
-			score: Math.round(clamp(weightedScore / totalWeight)),
-		};
-	});
-
-	return { rainRisk, scores };
-}
-
-function selectTopTier(scores) {
-	return scores.reduce((best, tier) =>
-		tier.score > best.score ? tier : best,
-	);
-}
-
-function toFiniteNumber(value, fallback = 0) {
-	const number = Number(value);
-	return Number.isFinite(number) ? number : fallback;
-}
-
-function normalizeWeatherResponse(data) {
-	if (!data.current || !data.hourly || !Array.isArray(data.hourly.time)) {
-		throw new Error(
-			"The weather service returned an incomplete forecast.",
-		);
-	}
-
-	const startIndex = Math.max(
-		0,
-		data.hourly.time.findIndex((time) => time >= data.current.time),
-	);
-
-	const hourly = data.hourly.time
-		.slice(startIndex, startIndex + FORECAST_HOURS)
-		.map((time, offset) => {
-			const index = startIndex + offset;
-			return {
-				time,
-				temperature: toFiniteNumber(
-					data.hourly.temperature_2m?.[index],
-				),
-				feelsLike: toFiniteNumber(
-					data.hourly.apparent_temperature?.[
-						index
-					],
-					toFiniteNumber(
-						data.hourly.temperature_2m?.[
-							index
-						],
-					),
-				),
-				precipitationProbability: toFiniteNumber(
-					data.hourly.precipitation_probability?.[
-						index
-					],
-				),
-				precipitation: toFiniteNumber(
-					data.hourly.precipitation?.[index],
-				),
-				windSpeed: toFiniteNumber(
-					data.hourly.wind_speed_10m?.[index] ??
-						data.hourly.windspeed_10m?.[
-							index
-						],
-				),
-				weatherCode: toFiniteNumber(
-					data.hourly.weather_code?.[index] ??
-						data.hourly.weathercode?.[
-							index
-						],
-				),
-			};
-		});
-
-	if (hourly.length < FORECAST_HOURS) {
-		throw new Error(
-			"A complete 8 hour forecast is not available yet.",
-		);
-	}
-
-	return {
-		current: {
-			time: data.current.time,
-			temperature: toFiniteNumber(
-				data.current.temperature_2m,
-			),
-			feelsLike: toFiniteNumber(
-				data.current.apparent_temperature,
-				toFiniteNumber(data.current.temperature_2m),
-			),
-			precipitation: toFiniteNumber(
-				data.current.precipitation,
-			),
-			windSpeed: toFiniteNumber(
-				data.current.wind_speed_10m ??
-					data.current.windspeed_10m,
-			),
-			weatherCode: toFiniteNumber(
-				data.current.weather_code ??
-					data.current.weathercode,
-			),
-		},
-		hourly,
-		timezone: data.timezone,
-	};
-}
+/* ---------- weather descriptors ---------- */
 
 function getWeatherDescriptor(code) {
 	if (code === 0) {
@@ -282,153 +102,305 @@ function buildWeatherUrl(location) {
 		forecast_days: "2",
 		timezone: "auto",
 	});
-
 	return `${WEATHER_API_URL}?${parameters.toString()}`;
 }
 
-async function requestJson(url) {
+/* ---------- network ---------- */
+
+// Resolves { data, cachedAt }; cachedAt is set when the service worker served a stored copy.
+async function requestJson(url, { signal, timeoutMs = API_TIMEOUT_MS } = {}) {
 	const controller = new AbortController();
-	const timeout = window.setTimeout(
-		() => controller.abort(),
-		API_TIMEOUT_MS,
-	);
+	let timedOut = false;
+	const timeout = window.setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+	}, timeoutMs);
+	const forwardAbort = () => controller.abort();
+	signal?.addEventListener("abort", forwardAbort, { once: true });
 
 	try {
 		const response = await fetch(url, {
 			headers: { Accept: "application/json" },
 			signal: controller.signal,
 		});
-
 		if (!response.ok) {
-			throw new Error(
-				`Request failed with status ${response.status}.`,
-			);
+			throw new Error(`Request failed with status ${response.status}.`);
 		}
-
-		return await response.json();
+		const cachedAt = Number(response.headers.get("x-sw-cached-at"));
+		return {
+			data: await response.json(),
+			cachedAt: Number.isFinite(cachedAt) && cachedAt > 0 ? cachedAt : null,
+		};
 	} catch (error) {
-		if (error.name === "AbortError") {
-			throw new Error(
-				"The request took too long. Please try again.",
-			);
+		if (error.name === "AbortError" && timedOut) {
+			throw new Error("The request took too long. Please try again.");
 		}
 		throw error;
 	} finally {
 		window.clearTimeout(timeout);
+		signal?.removeEventListener("abort", forwardAbort);
 	}
 }
 
-function setAppStatus(message) {
-	elements.status.textContent = message;
+/* ---------- skeleton / loading / error views ---------- */
+
+function createSkeletonTiers() {
+	return CLOTHING_TIERS.map(() => {
+		const item = document.createElement("article");
+		item.className = "tier-item skeleton-card";
+		item.setAttribute("aria-hidden", "true");
+		item.innerHTML =
+			'<div class="skeleton skeleton-line"></div><div class="skeleton skeleton-bar"></div>';
+		return item;
+	});
 }
 
-function renderLoading(message = "Reading the next 8 hours...") {
+function createSkeletonHours() {
+	return Array.from({ length: 8 }, () => {
+		const item = document.createElement("li");
+		item.className = "forecast-hour skeleton-card";
+		item.setAttribute("aria-hidden", "true");
+		item.innerHTML =
+			'<div class="skeleton skeleton-line"></div><div class="skeleton skeleton-dot"></div><div class="skeleton skeleton-line"></div>';
+		return item;
+	});
+}
+
+function renderLoading(message = "Reading the forecast...") {
 	state.topTier = null;
-	state.weather = null;
 	document.body.dataset.view = "loading";
-	elements.heroEyebrow.textContent = "Forecast in progress";
-	elements.heroTitle.textContent = "Looking outside";
-	elements.heroScore.textContent = "--";
-	elements.heroScoreLabel.textContent = "acceptance";
-	elements.heroReason.textContent = message;
-	elements.currentCondition.textContent = "--";
-	elements.currentTemperature.textContent = "--\u00B0";
-	elements.currentFeelsLike.textContent = "--\u00B0";
-	elements.currentWind.textContent = "-- km/h";
-	elements.currentRain.textContent = "-- mm";
-	elements.tierList.replaceChildren();
-	elements.forecastList.replaceChildren();
+	elements.retryButton.hidden = true;
+	setText(elements.heroEyebrow, "Forecast in progress");
+	setText(elements.heroTitle, "Looking outside");
+	setText(elements.heroScore, "--");
+	setText(elements.heroScoreLabel, "acceptance");
+	setText(elements.heroReason, message);
+	["currentTemperature", "currentFeelsLike"].forEach((key) =>
+		setText(elements[key], "--\u00B0"),
+	);
+	setText(elements.currentCondition, "--");
+	setText(elements.currentWind, "-- km/h");
+	setText(elements.currentRain, "-- mm");
+	elements.offlineBadge.hidden = true;
+	elements.alerts.hidden = true;
+	tierRefs.clear();
+	forecastRefs = [];
+	elements.tierList.replaceChildren(...createSkeletonTiers());
+	elements.forecastList.replaceChildren(...createSkeletonHours());
+	elements.locationName.classList.toggle("skeleton-text", !state.location);
 	setAppStatus(message);
 }
 
 function renderError(message) {
 	document.body.dataset.view = "error";
-	elements.heroEyebrow.textContent = "Forecast unavailable";
-	elements.heroTitle.textContent = "No answer yet";
-	elements.heroScore.textContent = "--";
-	elements.heroScoreLabel.textContent = "acceptance";
-	elements.heroReason.textContent = message;
+	state.topTier = null;
+	setText(elements.heroEyebrow, "Forecast unavailable");
+	setText(elements.heroTitle, "No answer yet");
+	setText(elements.heroScore, "--");
+	setText(elements.heroScoreLabel, "acceptance");
+	setText(elements.heroReason, message);
 	elements.retryButton.hidden = false;
+	elements.alerts.hidden = true;
+	elements.tierList.replaceChildren();
+	elements.forecastList.replaceChildren();
+	tierRefs.clear();
+	forecastRefs = [];
+	elements.locationName.classList.remove("skeleton-text");
 	setAppStatus(message);
 }
 
+function renderChooseLocation(message) {
+	renderError(message);
+	setText(elements.heroEyebrow, "Pick a location");
+	setText(elements.heroTitle, "Where are you?");
+	elements.retryButton.hidden = true;
+	setText(elements.locationName, "Choose location");
+}
+
+/* ---------- recommendation rendering (in-place) ---------- */
+
+function getScoringOptions() {
+	const { settings } = state;
+	return {
+		forecastHours: state.forecastHours,
+		exposure: settings.exposure,
+		thermalOffset: settings.thermalOffset,
+		labels: settings.labels,
+		window: settings.outWindow,
+	};
+}
+
+function isWindowActive() {
+	const { start, end } = state.settings.outWindow;
+	return Boolean(start && end && start !== end);
+}
+
 function formatForecastWindow(forecastHours) {
-	return forecastHours === 1
-		? "the next hour"
-		: `the next ${forecastHours} hours`;
+	return forecastHours === 1 ? "the next hour" : `the next ${forecastHours} hours`;
 }
 
-function getRecommendationReason(weather, rainRisk, forecastHours) {
-	const hours = weather.hourly.slice(0, forecastHours);
-	const forecastWindow = formatForecastWindow(forecastHours);
-	const strongestWind = Math.max(...hours.map((hour) => hour.windSpeed));
-	const temperatureChange =
-		hours[hours.length - 1].feelsLike - hours[0].feelsLike;
-
+function getRecommendationReason(hours, rainRisk, alerts) {
+	const windowLabel = isWindowActive()
+		? `${state.settings.outWindow.start}\u2013${state.settings.outWindow.end}`
+		: formatForecastWindow(hours.length);
+	if (alerts.length > 0) {
+		return `${alerts[0].message}.`;
+	}
 	if (rainRisk) {
-		return `Rain is likely within ${formatForecastWindow(Math.min(forecastHours, 6))}.`;
+		return "Rain is possible early on.";
 	}
+	const strongestWind = Math.max(...hours.map((hour) => hour.windSpeed));
+	const change = hours[hours.length - 1].feelsLike - hours[0].feelsLike;
 	if (strongestWind > 20) {
-		return `Wind reaches ${Math.round(strongestWind)} km/h within ${forecastWindow}.`;
+		return `Wind reaches ${Math.round(strongestWind)} km/h in ${windowLabel}.`;
 	}
-	if (temperatureChange <= -4) {
-		return `It will feel noticeably cooler within ${forecastWindow}.`;
+	if (change <= -4) {
+		return `It will feel noticeably cooler by the end of ${windowLabel}.`;
 	}
-	if (temperatureChange >= 4) {
-		return `It will feel noticeably warmer within ${forecastWindow}.`;
+	if (change >= 4) {
+		return `It will feel noticeably warmer by the end of ${windowLabel}.`;
 	}
-	if (hours.every((hour) => hour.precipitationProbability < 20)) {
-		return `Conditions stay settled for ${forecastWindow}.`;
-	}
-	return `Conditions remain fairly steady for ${forecastWindow}.`;
+	return `Conditions stay fairly steady for ${windowLabel}.`;
 }
 
-function announceRecommendation(topTier) {
-	const locationLabel = state.location?.label ?? "your location";
-	setAppStatus(
-		`For ${locationLabel}, ${topTier.label} is the top recommendation for ${formatForecastWindow(state.forecastHours)}, with ${topTier.score} percent acceptance.`,
-	);
-}
+function createTierRefs(tier) {
+	const root = document.createElement("article");
+	root.className = "tier-item";
+	root.dataset.tier = tier.id;
 
-function createTierElement(tier, isTopTier) {
-	const item = document.createElement("article");
-	item.className = "tier-item";
-	if (isTopTier) {
-		item.classList.add("tier-item--recommended");
-	}
-
-	const headingRow = document.createElement("div");
-	headingRow.className = "tier-heading";
-
+	const heading = document.createElement("div");
+	heading.className = "tier-heading";
 	const name = document.createElement("h3");
-	name.textContent = tier.label;
-
 	const value = document.createElement("span");
-	value.className = "tier-value";
-	value.textContent = `${tier.score}%`;
+	value.className = "tier-value mono";
+	heading.append(name, value);
 
+	const wrap = document.createElement("div");
+	wrap.className = "bar-wrap";
+	wrap.style.setProperty("--score", "0%");
 	const bar = document.createElement("div");
 	bar.className = "acceptance-bar";
 	bar.setAttribute("role", "progressbar");
-	bar.setAttribute("aria-label", `${tier.label} acceptance`);
 	bar.setAttribute("aria-valuemin", "0");
 	bar.setAttribute("aria-valuemax", "100");
-	bar.setAttribute("aria-valuenow", String(tier.score));
-	bar.style.setProperty("--score", `${tier.score}%`);
-
 	const fill = document.createElement("span");
 	fill.className = "acceptance-fill";
 	bar.append(fill);
+	wrap.append(bar);
 
-	headingRow.append(name, value);
-	item.append(headingRow, bar);
-	return item;
+	root.append(heading, wrap);
+	return { root, name, value, wrap, bar };
+}
+
+function updateTier(refs, tier, isTop) {
+	setText(refs.name, tier.label);
+	setText(refs.value, `${tier.score}%`);
+	refs.root.classList.toggle("tier-item--recommended", isTop);
+	refs.bar.setAttribute("aria-label", `${tier.label} acceptance`);
+	refs.bar.setAttribute("aria-valuenow", String(tier.score));
+	refs.wrap.style.setProperty("--score", `${tier.score}%`);
+}
+
+function renderTiers(scores, topTier) {
+	if (tierRefs.size === 0) {
+		const created = scores.map((tier) => {
+			const refs = createTierRefs(tier);
+			tierRefs.set(tier.id, refs);
+			return refs;
+		});
+		elements.tierList.replaceChildren(...created.map((refs) => refs.root));
+		// Bars start at 0 and grow on the next frames so the CSS transition runs.
+		window.requestAnimationFrame(() =>
+			window.requestAnimationFrame(() =>
+				scores.forEach((tier) =>
+					updateTier(tierRefs.get(tier.id), tier, tier.id === topTier.id),
+				),
+			),
+		);
+		scores.forEach((tier) => {
+			const refs = tierRefs.get(tier.id);
+			setText(refs.name, tier.label);
+			setText(refs.value, `${tier.score}%`);
+		});
+		return;
+	}
+	scores.forEach((tier) =>
+		updateTier(tierRefs.get(tier.id), tier, tier.id === topTier.id),
+	);
+}
+
+function renderAlerts(alerts) {
+	const footwear = getFootwearAdvice(alerts);
+	elements.alerts.hidden = alerts.length === 0;
+
+	const items = alerts.map((alert) => {
+		const item = document.createElement("li");
+		item.className = `alert-item alert-item--${alert.severity}`;
+		const text = document.createElement("span");
+		text.textContent = alert.message;
+		item.append(text);
+		return item;
+	});
+	elements.alertList.replaceChildren(...items);
+
+	elements.footwear.hidden = !footwear;
+	if (footwear) {
+		setText(elements.footwearTitle, `Wear: ${footwear.recommend}`);
+		setText(elements.footwearDetail, `Avoid: ${footwear.avoid} \u00B7 ${footwear.window}`);
+	}
+}
+
+function updateForecastWindowMarks(windowHours) {
+	const times = new Set(windowHours.map((hour) => hour.time));
+	forecastRefs.forEach(({ item, time }) =>
+		item.classList.toggle("forecast-hour--out", times.has(time)),
+	);
+}
+
+function renderRecommendation() {
+	if (!state.weather) {
+		return;
+	}
+	const { hours, rainRisk, scores } = calculateTierScores(
+		state.weather.hourly,
+		getScoringOptions(),
+	);
+	const alerts = findPrecipitationAlerts(hours);
+	const topTier = selectTopTier(scores);
+	const previousTop = state.topTier;
+	state.topTier = topTier;
+
+	document.body.dataset.view = "ready";
+	document.body.dataset.recommendation = topTier.id;
+	elements.retryButton.hidden = true;
+	setText(elements.heroEyebrow, "Top recommendation");
+	setText(elements.heroTitle, topTier.label);
+	setText(elements.heroScore, String(topTier.score));
+	setText(elements.heroScoreLabel, "% acceptance");
+	setText(elements.heroMonogram, topTier.shortLabel);
+	setText(elements.heroReason, getRecommendationReason(hours, rainRisk, alerts));
+
+	const windowActive = isWindowActive();
+	elements.forecastHours.disabled = windowActive;
+	setText(
+		elements.bestNextEyebrow,
+		windowActive ? "Out of the house" : "Best fit for the next",
+	);
+
+	renderTiers(scores, topTier);
+	renderAlerts(alerts);
+	updateForecastWindowMarks(windowActive ? hours : []);
+
+	if (!previousTop || previousTop.id !== topTier.id || previousTop.label !== topTier.label) {
+		setAppStatus(
+			`For ${state.location?.label ?? "your location"}, ${topTier.label} is the top recommendation, with ${topTier.score} percent acceptance.`,
+		);
+	}
 }
 
 function formatHour(isoTime) {
 	const hour = Number(isoTime.slice(11, 13));
-	const normalizedHour = hour % 12 || 12;
-	return `${normalizedHour}${hour < 12 ? "am" : "pm"}`;
+	return `${hour % 12 || 12}${hour < 12 ? "am" : "pm"}`;
 }
 
 function createForecastElement(hour, index) {
@@ -438,6 +410,7 @@ function createForecastElement(hour, index) {
 
 	const time = document.createElement("time");
 	time.dateTime = hour.time;
+	time.className = "mono";
 	time.textContent = index === 0 ? "Now" : formatHour(hour.time);
 
 	const icon = document.createElement("span");
@@ -447,10 +420,11 @@ function createForecastElement(hour, index) {
 	icon.textContent = descriptor.icon;
 
 	const temperature = document.createElement("strong");
+	temperature.className = "mono";
 	temperature.textContent = `${Math.round(hour.temperature)}\u00B0`;
 
 	const rain = document.createElement("span");
-	rain.className = "forecast-rain";
+	rain.className = "forecast-rain mono";
 	rain.textContent = `${Math.round(hour.precipitationProbability)}%`;
 	rain.setAttribute(
 		"aria-label",
@@ -461,67 +435,85 @@ function createForecastElement(hour, index) {
 	return item;
 }
 
-function renderWeather(weather) {
-	const { rainRisk, scores } = calculateTierScores(
-		weather.hourly,
-		state.forecastHours,
-	);
-	const topTier = selectTopTier(scores);
-	const currentDescriptor = getWeatherDescriptor(
-		weather.current.weatherCode,
-	);
+function renderBadge() {
+	const show = state.fromCache && state.fetchedAt;
+	elements.offlineBadge.hidden = !show;
+	if (show) {
+		setText(
+			elements.offlineBadge,
+			`Last updated at ${formatTimestamp(state.fetchedAt)}`,
+		);
+	}
+}
 
+function renderWeather(weather, { fetchedAt, fromCache }) {
 	state.weather = weather;
-	state.topTier = topTier;
-	document.body.dataset.view = "ready";
-	document.body.dataset.recommendation = topTier.id;
-	elements.retryButton.hidden = true;
-	elements.heroEyebrow.textContent = "Top recommendation";
-	elements.heroTitle.textContent = topTier.label;
-	elements.heroScore.textContent = String(topTier.score);
-	elements.heroScoreLabel.textContent = "% acceptance";
-	elements.heroMonogram.textContent = topTier.shortLabel;
-	elements.heroReason.textContent = getRecommendationReason(
-		weather,
-		rainRisk,
-		state.forecastHours,
-	);
-	elements.currentCondition.textContent = currentDescriptor.label;
-	elements.currentTemperature.textContent = `${Math.round(weather.current.temperature)}\u00B0`;
-	elements.currentFeelsLike.textContent = `${Math.round(weather.current.feelsLike)}\u00B0`;
-	elements.currentWind.textContent = `${Math.round(weather.current.windSpeed)} km/h`;
-	elements.currentRain.textContent = `${weather.current.precipitation.toFixed(1)} mm`;
+	state.fetchedAt = fetchedAt;
+	state.fromCache = fromCache;
 
-	elements.tierList.replaceChildren(
-		...scores.map((tier) =>
-			createTierElement(tier, tier.id === topTier.id),
-		),
-	);
-	elements.forecastList.replaceChildren(
-		...weather.hourly.map(createForecastElement),
-	);
+	const current = weather.current;
+	setText(elements.currentCondition, getWeatherDescriptor(current.weatherCode).label);
+	setText(elements.currentTemperature, `${Math.round(current.temperature)}\u00B0`);
+	setText(elements.currentFeelsLike, `${Math.round(current.feelsLike)}\u00B0`);
+	setText(elements.currentWind, `${Math.round(current.windSpeed)} km/h`);
+	setText(elements.currentRain, `${current.precipitation.toFixed(1)} mm`);
 
-	announceRecommendation(topTier);
+	const shown = weather.hourly.slice(0, FORECAST_HOURS);
+	forecastRefs = shown.map((hour, index) => ({
+		item: createForecastElement(hour, index),
+		time: hour.time,
+	}));
+	elements.forecastList.replaceChildren(...forecastRefs.map((ref) => ref.item));
+	elements.locationName.classList.remove("skeleton-text");
+
+	tierRefs.clear();
+	renderRecommendation();
+	renderBadge();
+}
+
+/* ---------- loading weather ---------- */
+
+function showCachedWeather(location) {
+	const entry = loadWeatherCache(storage, location);
+	if (!entry) {
+		return false;
+	}
+	renderWeather(entry.weather, { fetchedAt: entry.fetchedAt, fromCache: true });
+	return true;
 }
 
 async function loadWeather(location, revision) {
 	renderLoading();
 
+	if (navigator.onLine === false && showCachedWeather(location)) {
+		return;
+	}
+
 	try {
-		const data = await requestJson(buildWeatherUrl(location));
+		const { data, cachedAt } = await requestJson(buildWeatherUrl(location));
 		if (revision !== state.locationRevision) {
 			return;
 		}
-		renderWeather(normalizeWeatherResponse(data));
+		const weather = normalizeWeatherResponse(data);
+		const fetchedAt = cachedAt ?? Date.now();
+		saveWeatherCache(storage, location, weather, fetchedAt);
+		renderWeather(weather, { fetchedAt, fromCache: cachedAt !== null });
 	} catch (error) {
 		if (revision !== state.locationRevision) {
 			return;
 		}
+		if (showCachedWeather(location)) {
+			return;
+		}
 		renderError(
-			error.message || "Could not load the weather forecast.",
+			navigator.onLine === false
+				? "You're offline and no saved forecast exists for this location."
+				: error.message || "Could not load the weather forecast.",
 		);
 	}
 }
+
+/* ---------- location ---------- */
 
 function getLocationLabel(result) {
 	const address = result.address ?? {};
@@ -538,10 +530,9 @@ function getLocationLabel(result) {
 }
 
 function renderLocation() {
-	elements.locationName.textContent =
-		state.location?.label ?? "Locating...";
-	elements.locationName.title =
-		state.location?.label ?? "Finding your location";
+	const label = state.location?.label ?? "Locating...";
+	setText(elements.locationName, label);
+	elements.locationName.title = label;
 }
 
 async function resolveLocationName(location, revision) {
@@ -552,19 +543,17 @@ async function resolveLocationName(location, revision) {
 		zoom: "10",
 		addressdetails: "1",
 	});
-
 	try {
-		const result = await requestJson(
+		const { data } = await requestJson(
 			`${GEOCODING_API_URL}/reverse?${parameters.toString()}`,
 		);
 		if (revision !== state.locationRevision) {
 			return;
 		}
-		state.location.label = getLocationLabel(result);
+		state.location.label = getLocationLabel(data);
+		state.settings.location = { ...state.location };
+		persistSettings();
 		renderLocation();
-		if (state.topTier) {
-			announceRecommendation(state.topTier);
-		}
 	} catch {
 		// The forecast remains usable when reverse geocoding is unavailable.
 	}
@@ -574,10 +563,11 @@ function chooseLocation(location, shouldResolveName = false) {
 	state.locationRevision += 1;
 	const revision = state.locationRevision;
 	state.location = location;
+	state.settings.location = { ...location };
+	persistSettings();
 	renderLocation();
 	closeLocationDialog();
 	loadWeather(location, revision);
-
 	if (shouldResolveName) {
 		resolveLocationName(location, revision);
 	}
@@ -589,18 +579,31 @@ function handleGeolocationError(error) {
 		2: "Your location could not be determined. Search for a city instead.",
 		3: "Location lookup timed out. Search for a city instead.",
 	};
-	const message =
-		messages[error.code] ?? "Search for a city to get started.";
-	renderError(message);
+	const message = messages[error.code] ?? "Search for a city to get started.";
+	if (error.code === 1) {
+		state.settings.geoPreference = "denied";
+		persistSettings();
+	}
+	if (!state.location && state.settings.location) {
+		chooseLocation(state.settings.location, false);
+		setAppStatus(message);
+		return;
+	}
+	if (!state.location) {
+		renderChooseLocation(message);
+	}
 	openLocationDialog();
+	setText(elements.locationSearchStatus, message);
 }
 
+// Only called from an explicit click, or at startup once permission is already granted.
 function requestDeviceLocation() {
-	renderLoading("Waiting for location permission...");
-
 	if (!navigator.geolocation) {
 		handleGeolocationError({ code: 2 });
 		return;
+	}
+	if (!state.weather) {
+		renderLoading("Waiting for location permission...");
 	}
 
 	const startingRevision = state.locationRevision;
@@ -609,6 +612,7 @@ function requestDeviceLocation() {
 			if (startingRevision !== state.locationRevision) {
 				return;
 			}
+			state.settings.geoPreference = "granted";
 			chooseLocation(
 				{
 					latitude: coords.latitude,
@@ -624,12 +628,20 @@ function requestDeviceLocation() {
 			}
 			handleGeolocationError(error);
 		},
-		{
-			enableHighAccuracy: false,
-			maximumAge: 10 * 60 * 1000,
-			timeout: 10000,
-		},
+		{ enableHighAccuracy: false, maximumAge: 10 * 60 * 1000, timeout: 10000 },
 	);
+}
+
+async function isGeolocationPermitted() {
+	if (state.settings.geoPreference !== "granted" || !navigator.permissions) {
+		return false;
+	}
+	try {
+		const status = await navigator.permissions.query({ name: "geolocation" });
+		return status.state === "granted";
+	} catch {
+		return false;
+	}
 }
 
 function openLocationDialog() {
@@ -647,7 +659,6 @@ function closeLocationDialog() {
 
 function renderSearchResults(results) {
 	elements.locationResults.replaceChildren();
-
 	if (results.length === 0) {
 		const emptyState = document.createElement("p");
 		emptyState.className = "search-empty";
@@ -655,14 +666,12 @@ function renderSearchResults(results) {
 		elements.locationResults.append(emptyState);
 		return;
 	}
-
 	results.forEach((result, index) => {
 		const item = document.createElement("li");
 		const button = document.createElement("button");
 		button.className = "search-result";
 		button.type = "button";
 		button.dataset.resultIndex = String(index);
-
 		const primary = document.createElement("strong");
 		primary.textContent = getLocationLabel(result);
 		const secondary = document.createElement("span");
@@ -673,59 +682,94 @@ function renderSearchResults(results) {
 	});
 }
 
+function showSearchResults(results) {
+	state.searchResults = results;
+	renderSearchResults(results);
+	setText(
+		elements.locationSearchStatus,
+		`${results.length} location${results.length === 1 ? "" : "s"} found.`,
+	);
+}
+
 async function searchLocations(query) {
+	const key = query.toLowerCase();
+	if (key === lastQuery) {
+		return;
+	}
+	lastQuery = key;
+	searchController?.abort();
+
+	if (searchCache.has(key)) {
+		showSearchResults(searchCache.get(key));
+		return;
+	}
+
+	const controller = new AbortController();
+	searchController = controller;
 	const parameters = new URLSearchParams({
 		format: "jsonv2",
 		q: query,
 		limit: "5",
 		addressdetails: "1",
 	});
-
-	elements.locationSearchStatus.textContent = "Searching...";
+	setText(elements.locationSearchStatus, "Searching...");
 	elements.locationSearchButton.disabled = true;
 
 	try {
-		const results = await requestJson(
+		const { data } = await requestJson(
 			`${GEOCODING_API_URL}/search?${parameters.toString()}`,
+			{ signal: controller.signal },
 		);
-		state.searchResults = Array.isArray(results) ? results : [];
-		renderSearchResults(state.searchResults);
-		elements.locationSearchStatus.textContent = `${state.searchResults.length} location${state.searchResults.length === 1 ? "" : "s"} found.`;
+		const results = Array.isArray(data) ? data : [];
+		searchCache.set(key, results);
+		showSearchResults(results);
 	} catch (error) {
+		if (controller.signal.aborted) {
+			return;
+		}
+		lastQuery = "";
 		state.searchResults = [];
 		elements.locationResults.replaceChildren();
-		elements.locationSearchStatus.textContent =
-			error.message || "Location search failed.";
+		setText(
+			elements.locationSearchStatus,
+			error.message || "Location search failed. Try again.",
+		);
 	} finally {
-		elements.locationSearchButton.disabled = false;
+		if (searchController === controller) {
+			elements.locationSearchButton.disabled = false;
+		}
 	}
+}
+
+const debouncedSearch = debounce(searchLocations, SEARCH_DEBOUNCE_MS);
+
+function handleLocationInput() {
+	const query = elements.locationInput.value.trim();
+	if (query.length < MIN_QUERY_LENGTH) {
+		debouncedSearch.cancel();
+		return;
+	}
+	debouncedSearch(query);
 }
 
 function handleLocationSearch(event) {
 	event.preventDefault();
+	debouncedSearch.cancel();
 	const query = elements.locationInput.value.trim();
-
-	if (query.length < 2) {
-		elements.locationSearchStatus.textContent =
-			"Enter at least 2 characters.";
+	if (query.length < MIN_QUERY_LENGTH) {
+		setText(elements.locationSearchStatus, "Enter at least 2 characters.");
 		elements.locationInput.focus();
 		return;
 	}
-
 	searchLocations(query);
 }
 
 function handleSearchResultClick(event) {
 	const button = event.target.closest("[data-result-index]");
-	if (!button) {
-		return;
-	}
-
-	const result = state.searchResults[Number(button.dataset.resultIndex)];
+	const result = button && state.searchResults[Number(button.dataset.resultIndex)];
 	if (!result) {
 		return;
 	}
-
 	chooseLocation({
 		latitude: toFiniteNumber(result.lat),
 		longitude: toFiniteNumber(result.lon),
@@ -733,25 +777,108 @@ function handleSearchResultClick(event) {
 	});
 }
 
-function toggleTheme() {
-	state.theme = state.theme === "dark" ? "light" : "dark";
-	document.documentElement.dataset.theme = state.theme;
+/* ---------- settings UI ---------- */
+
+function applyTheme() {
+	const theme = state.settings.theme;
+	document.documentElement.dataset.theme = theme;
 	elements.themeToggle.setAttribute(
 		"aria-label",
-		`Switch to ${state.theme === "dark" ? "light" : "dark"} theme`,
+		`Switch to ${theme === "dark" ? "light" : "dark"} theme`,
 	);
-	elements.themeToggle.setAttribute(
-		"aria-pressed",
-		String(state.theme === "light"),
-	);
+	elements.themeToggle.setAttribute("aria-pressed", String(theme === "light"));
+	document.querySelector('meta[name="theme-color"]').content =
+		theme === "dark" ? "#0b0a14" : "#f1f4f3";
+}
 
-	const themeColor = document.querySelector('meta[name="theme-color"]');
-	themeColor.content = state.theme === "dark" ? "#171614" : "#f3f1ec";
+function formatOffset(value) {
+	return `${value > 0 ? "+" : ""}${value.toFixed(1)}\u00B0`;
+}
+
+function syncSettingsControls() {
+	const { settings } = state;
+	elements.exposureInputs.forEach((input) => {
+		input.checked = input.value === settings.exposure;
+	});
+	elements.thermalSlider.value = String(settings.thermalOffset);
+	setText(elements.thermalValue, formatOffset(settings.thermalOffset));
+	elements.labelInputs.forEach((input) => {
+		const key = input.dataset.tierLabel;
+		input.value = settings.labels[key] === DEFAULT_LABELS[key] ? "" : settings.labels[key];
+		input.placeholder = DEFAULT_LABELS[key];
+	});
+	elements.outStart.value = settings.outWindow.start;
+	elements.outEnd.value = settings.outWindow.end;
+}
+
+let recomputeScheduled = false;
+function scheduleRecommendation() {
+	if (recomputeScheduled) {
+		return;
+	}
+	recomputeScheduled = true;
+	window.requestAnimationFrame(() => {
+		recomputeScheduled = false;
+		renderRecommendation();
+	});
+}
+
+const saveSettingsSoon = debounce(persistSettings, 250);
+
+function handleExposureChange(event) {
+	state.settings.exposure = event.target.value;
+	persistSettings();
+	scheduleRecommendation();
+}
+
+function handleThermalInput() {
+	const offset = toFiniteNumber(elements.thermalSlider.value);
+	state.settings.thermalOffset = offset;
+	setText(elements.thermalValue, formatOffset(offset));
+	saveSettingsSoon();
+	scheduleRecommendation();
+}
+
+function handleLabelInput() {
+	const labels = { ...DEFAULT_LABELS };
+	elements.labelInputs.forEach((input) => {
+		labels[input.dataset.tierLabel] = input.value;
+	});
+	state.settings.labels = sanitizeSettings({ labels }).labels;
+	saveSettingsSoon();
+	scheduleRecommendation();
+}
+
+function handleWindowChange() {
+	state.settings.outWindow = {
+		start: elements.outStart.value,
+		end: elements.outEnd.value,
+	};
+	persistSettings();
+	scheduleRecommendation();
+}
+
+function handleResetSettings() {
+	const defaults = sanitizeSettings(null);
+	Object.assign(state.settings, {
+		exposure: defaults.exposure,
+		thermalOffset: defaults.thermalOffset,
+		labels: defaults.labels,
+		outWindow: defaults.outWindow,
+	});
+	persistSettings();
+	syncSettingsControls();
+	scheduleRecommendation();
+}
+
+function toggleTheme() {
+	state.settings.theme = state.settings.theme === "dark" ? "light" : "dark";
+	persistSettings();
+	applyTheme();
 }
 
 function handleForecastHoursChange(event) {
 	const forecastHours = Number(event.currentTarget.value);
-
 	if (
 		!Number.isInteger(forecastHours) ||
 		forecastHours < 1 ||
@@ -760,74 +887,83 @@ function handleForecastHoursChange(event) {
 		event.currentTarget.value = String(state.forecastHours);
 		return;
 	}
-
 	state.forecastHours = forecastHours;
-	if (state.weather) {
-		renderWeather(state.weather);
-	}
+	scheduleRecommendation();
 }
 
+/* ---------- boot ---------- */
+
 function cacheDomElements() {
+	const $ = (selector) => document.querySelector(selector);
 	Object.assign(elements, {
-		closeLocationButton: document.querySelector("#close-location"),
-		currentCondition: document.querySelector("#current-condition"),
-		currentFeelsLike: document.querySelector("#current-feels-like"),
-		currentRain: document.querySelector("#current-rain"),
-		currentTemperature: document.querySelector(
-			"#current-temperature",
-		),
-		currentWind: document.querySelector("#current-wind"),
-		forecastHours: document.querySelector("#forecast-hours"),
-		forecastList: document.querySelector("#forecast-list"),
-		heroEyebrow: document.querySelector("#hero-eyebrow"),
-		heroMonogram: document.querySelector("#hero-monogram"),
-		heroReason: document.querySelector("#hero-reason"),
-		heroScore: document.querySelector("#hero-score"),
-		heroScoreLabel: document.querySelector("#hero-score-label"),
-		heroTitle: document.querySelector("#hero-title"),
-		locationButton: document.querySelector("#location-button"),
-		locationDialog: document.querySelector("#location-dialog"),
-		locationForm: document.querySelector("#location-form"),
-		locationInput: document.querySelector("#location-input"),
-		locationName: document.querySelector("#location-name"),
-		locationResults: document.querySelector("#location-results"),
-		locationSearchButton: document.querySelector(
-			"#location-search-button",
-		),
-		locationSearchStatus: document.querySelector(
-			"#location-search-status",
-		),
-		retryButton: document.querySelector("#retry-button"),
-		status: document.querySelector("#app-status"),
-		themeToggle: document.querySelector("#theme-toggle"),
-		tierList: document.querySelector("#tier-list"),
-		useDeviceLocationButton: document.querySelector(
-			"#use-device-location",
-		),
+		alertList: $("#alert-list"),
+		alerts: $("#alerts"),
+		bestNextEyebrow: $("#best-next-eyebrow"),
+		closeLocationButton: $("#close-location"),
+		currentCondition: $("#current-condition"),
+		currentFeelsLike: $("#current-feels-like"),
+		currentRain: $("#current-rain"),
+		currentTemperature: $("#current-temperature"),
+		currentWind: $("#current-wind"),
+		exposureInputs: document.querySelectorAll('input[name="exposure"]'),
+		footwear: $("#footwear"),
+		footwearDetail: $("#footwear-detail"),
+		footwearTitle: $("#footwear-title"),
+		forecastHours: $("#forecast-hours"),
+		forecastList: $("#forecast-list"),
+		heroEyebrow: $("#hero-eyebrow"),
+		heroMonogram: $("#hero-monogram"),
+		heroReason: $("#hero-reason"),
+		heroScore: $("#hero-score"),
+		heroScoreLabel: $("#hero-score-label"),
+		heroTitle: $("#hero-title"),
+		labelInputs: document.querySelectorAll("[data-tier-label]"),
+		locationButton: $("#location-button"),
+		locationDialog: $("#location-dialog"),
+		locationForm: $("#location-form"),
+		locationInput: $("#location-input"),
+		locationName: $("#location-name"),
+		locationResults: $("#location-results"),
+		locationSearchButton: $("#location-search-button"),
+		locationSearchStatus: $("#location-search-status"),
+		offlineBadge: $("#offline-badge"),
+		outEnd: $("#out-end"),
+		outStart: $("#out-start"),
+		resetSettings: $("#reset-settings"),
+		retryButton: $("#retry-button"),
+		status: $("#app-status"),
+		themeToggle: $("#theme-toggle"),
+		thermalSlider: $("#thermal-slider"),
+		thermalValue: $("#thermal-value"),
+		tierList: $("#tier-list"),
+		useDeviceLocationButton: $("#use-device-location"),
 	});
 }
 
 function bindEvents() {
-	elements.forecastHours.addEventListener(
-		"change",
-		handleForecastHoursChange,
-	);
+	elements.forecastHours.addEventListener("change", handleForecastHoursChange);
 	elements.locationButton.addEventListener("click", openLocationDialog);
-	elements.closeLocationButton.addEventListener(
-		"click",
-		closeLocationDialog,
-	);
+	elements.closeLocationButton.addEventListener("click", closeLocationDialog);
 	elements.locationForm.addEventListener("submit", handleLocationSearch);
-	elements.locationResults.addEventListener(
-		"click",
-		handleSearchResultClick,
-	);
+	elements.locationInput.addEventListener("input", handleLocationInput);
+	elements.locationResults.addEventListener("click", handleSearchResultClick);
 	elements.themeToggle.addEventListener("click", toggleTheme);
+	elements.exposureInputs.forEach((input) =>
+		input.addEventListener("change", handleExposureChange),
+	);
+	elements.thermalSlider.addEventListener("input", handleThermalInput);
+	elements.thermalSlider.addEventListener("change", persistSettings);
+	elements.labelInputs.forEach((input) =>
+		input.addEventListener("input", handleLabelInput),
+	);
+	elements.outStart.addEventListener("change", handleWindowChange);
+	elements.outEnd.addEventListener("change", handleWindowChange);
+	elements.resetSettings.addEventListener("click", handleResetSettings);
 	elements.retryButton.addEventListener("click", () => {
 		if (state.location) {
 			loadWeather(state.location, state.locationRevision);
 		} else {
-			requestDeviceLocation();
+			openLocationDialog();
 		}
 	});
 	elements.useDeviceLocationButton.addEventListener("click", () => {
@@ -839,6 +975,25 @@ function bindEvents() {
 			closeLocationDialog();
 		}
 	});
+	window.addEventListener("online", () => {
+		if (state.location) {
+			loadWeather(state.location, state.locationRevision);
+		}
+	});
+	window.addEventListener("offline", () => {
+		if (state.weather) {
+			state.fromCache = true;
+			renderBadge();
+		}
+	});
+	// Last-resort boundary: keep the DOM usable and recoverable.
+	const fail = () => {
+		if (document.body.dataset.view === "loading") {
+			renderError("Something went wrong. Please try again.");
+		}
+	};
+	window.addEventListener("error", fail);
+	window.addEventListener("unhandledrejection", fail);
 }
 
 function registerServiceWorker() {
@@ -849,22 +1004,30 @@ function registerServiceWorker() {
 	}
 }
 
+async function startApp() {
+	if (await isGeolocationPermitted()) {
+		requestDeviceLocation();
+		return;
+	}
+	const saved = state.settings.location;
+	if (saved) {
+		chooseLocation(saved, false);
+		return;
+	}
+	renderChooseLocation(
+		"Search for a city, or use your current location.",
+	);
+	openLocationDialog();
+}
+
 function initializeApp() {
 	cacheDomElements();
+	applyTheme();
+	syncSettingsControls();
 	bindEvents();
 	registerServiceWorker();
-	requestDeviceLocation();
+	renderLoading("Getting started...");
+	startApp();
 }
 
-if (typeof document !== "undefined") {
-	document.addEventListener("DOMContentLoaded", initializeApp);
-}
-
-if (typeof module !== "undefined" && module.exports) {
-	module.exports = {
-		calculateTierScores,
-		getHourWeight,
-		interpolateScore,
-		selectTopTier,
-	};
-}
+document.addEventListener("DOMContentLoaded", initializeApp);

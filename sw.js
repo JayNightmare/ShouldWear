@@ -1,18 +1,25 @@
 "use strict";
 
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v16";
 const STATIC_CACHE = `shouldwear-static-${CACHE_VERSION}`;
 const API_CACHE = `shouldwear-api-${CACHE_VERSION}`;
 const CURRENT_CACHES = new Set([STATIC_CACHE, API_CACHE]);
 const APP_SHELL = [
 	"./",
 	"./index.html",
+	"./privacy.html",
+	"./terms.html",
 	"./style.css",
 	"./core.js",
 	"./app.js",
 	"./manifest.json",
 	"./icons/icon-192.svg",
 	"./icons/icon-512.svg",
+	"./icons/twemoji-beach.svg",
+	"./icons/twemoji-blossom.svg",
+	"./icons/twemoji-tree.svg",
+	"./icons/twemoji-leaf.svg",
+	"./icons/twemoji-snowflake.svg",
 ];
 const API_ORIGINS = new Set([
 	"https://api.open-meteo.com",
@@ -71,7 +78,11 @@ async function storeLatest(cache, request, response, isWeather) {
 		const keys = await cache.keys();
 		await Promise.all(
 			keys
-				.filter((key) => new URL(key.url).origin === WEATHER_ORIGIN)
+				.filter(
+					(key) =>
+						new URL(key.url).origin ===
+						WEATHER_ORIGIN,
+				)
 				.map((key) => cache.delete(key)),
 		);
 	}
@@ -84,7 +95,12 @@ async function networkFirst(request) {
 
 	const network = fetch(request).then(async (response) => {
 		if (response.ok) {
-			await storeLatest(cache, request, response.clone(), isWeather);
+			await storeLatest(
+				cache,
+				request,
+				response.clone(),
+				isWeather,
+			);
 		}
 		return response;
 	});
@@ -93,7 +109,10 @@ async function networkFirst(request) {
 
 	// Slow or failed network: answer from cache straight away when possible.
 	const timeout = new Promise((resolve) =>
-		setTimeout(() => resolve(cache.match(request)), NETWORK_TIMEOUT_MS),
+		setTimeout(
+			() => resolve(cache.match(request)),
+			NETWORK_TIMEOUT_MS,
+		),
 	);
 
 	try {
@@ -144,9 +163,7 @@ self.addEventListener("fetch", (event) => {
 		return;
 	}
 
-	if (
-		url.origin === self.location.origin
-	) {
+	if (url.origin === self.location.origin) {
 		event.respondWith(cacheFirst(event.request));
 	}
 });

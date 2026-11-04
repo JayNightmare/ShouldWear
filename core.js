@@ -18,6 +18,14 @@
 	const WEATHER_CACHE_KEY = "shouldwear:last-weather";
 	const THERMAL_OFFSET_LIMIT = 5;
 	const LABEL_MAX_LENGTH = 24;
+	// Each step below the warmest tier's ideal range adds one "+" (a layer worn underneath).
+	const LAYER_STEP_DEGREES = 3;
+	const MAX_EXTRA_LAYERS = 3;
+	const WEEK_HOURS = 168;
+	const COMFORT_MIN = 1;
+	const COMFORT_MAX = 5;
+	const COMFORT_DEFAULT = 3;
+	const COMFORT_DEGREES_PER_STEP = 2.5;
 
 	const DEFAULT_LABELS = {
 		hoodie: "Hoodie",
@@ -76,8 +84,8 @@
 	 * is felt (chillWeight) and adds a small stationary penalty (restingOffset).
 	 */
 	const EXPOSURE_PROFILES = {
-		transit: { chillWeight: 1, restingOffset: 0 },
-		prolonged: { chillWeight: 1.6, restingOffset: -1.5 },
+		short: { chillWeight: 1, restingOffset: 0 },
+		long: { chillWeight: 1.6, restingOffset: -1.5 },
 	};
 
 	const PRECIP = {
@@ -89,9 +97,11 @@
 	};
 
 	const DEFAULT_SETTINGS = {
-		exposure: "transit",
+		exposure: "short",
 		thermalOffset: 0,
+		comfort: 3,
 		labels: { ...DEFAULT_LABELS },
+		available: { hoodie: true, jumper: true, shirt: true },
 		outWindow: { start: "", end: "" },
 		geoPreference: null,
 		theme: "dark",
@@ -118,8 +128,13 @@
 			const [upperT, upperScore] = curve[index];
 			const [lowerT, lowerScore] = curve[index - 1];
 			if (temperature <= upperT) {
-				const progress = (temperature - lowerT) / (upperT - lowerT);
-				return lowerScore + progress * (upperScore - lowerScore);
+				const progress =
+					(temperature - lowerT) /
+					(upperT - lowerT);
+				return (
+					lowerScore +
+					progress * (upperScore - lowerScore)
+				);
 			}
 		}
 		return curve[curve.length - 1][1];
@@ -133,7 +148,7 @@
 	}
 
 	function getExposureProfile(exposure) {
-		return EXPOSURE_PROFILES[exposure] || EXPOSURE_PROFILES.transit;
+		return EXPOSURE_PROFILES[exposure] || EXPOSURE_PROFILES.short;
 	}
 
 	// Temperature used for scoring only; displayed readings stay raw.
@@ -141,7 +156,8 @@
 		const profile = getExposureProfile(options.exposure);
 		const offset = toFiniteNumber(options.thermalOffset);
 		const chill = hour.feelsLike - hour.temperature;
-		const adjustedChill = chill < 0 ? chill * profile.chillWeight : chill;
+		const adjustedChill =
+			chill < 0 ? chill * profile.chillWeight : chill;
 		return (
 			hour.temperature +
 			adjustedChill +
@@ -160,7 +176,10 @@
 	}
 
 	function hourStartMinutes(isoTime) {
-		return Number(isoTime.slice(11, 13)) * 60 + Number(isoTime.slice(14, 16));
+		return (
+			Number(isoTime.slice(11, 13)) * 60 +
+			Number(isoTime.slice(14, 16))
+		);
 	}
 
 	// Hours whose slot overlaps the [start, end) out-of-house window; supports overnight windows.
@@ -206,13 +225,38 @@
 		const effective = hours.map((hour) =>
 			getEffectiveTemperature(hour, options),
 		);
+		// Nothing warmer exists to recommend, so the warmest available layer never loses score to cold.
+		const warmestId = (
+			CLOTHING_TIERS.find(
+				(tier) =>
+					options.available?.[tier.id] !== false,
+			) || CLOTHING_TIERS[0]
+		).id;
+
+		const weightSum = effective.reduce(
+			(total, _, index) => total + getHourWeight(index),
+			0,
+		);
+		const averageEffective =
+			effective.reduce(
+				(total, temperature, index) =>
+					total + temperature * getHourWeight(index),
+				0,
+			) / weightSum;
 
 		const scores = CLOTHING_TIERS.map((tier) => {
+			const plateauStart = tier.curve.find(
+				([, value]) => value === 100,
+			)[0];
 			let weighted = 0;
 			let totalWeight = 0;
 			effective.forEach((temperature, index) => {
 				const weight = getHourWeight(index);
-				let score = interpolateScore(temperature, tier.curve);
+				let score =
+					tier.id === warmestId &&
+					temperature < plateauStart
+						? 100
+						: interpolateScore(temperature, tier.curve);
 				if (rainRisk) {
 					score -= tier.rainPenalty;
 				}
@@ -222,7 +266,20 @@
 			return {
 				...tier,
 				label: labels[tier.id],
-				score: Math.round(clamp(weighted / totalWeight)),
+				score: Math.round(
+					clamp(weighted / totalWeight),
+				),
+				layers:
+					tier.id === warmestId
+						? Math.round(
+								clamp(
+									(plateauStart - averageEffective) /
+										LAYER_STEP_DEGREES,
+									0,
+									MAX_EXTRA_LAYERS,
+								),
+							)
+						: 0,
 			};
 		});
 
@@ -259,7 +316,9 @@
 		if (hour.precipitation >= PRECIP.heavyMm) {
 			return "heavy";
 		}
-		return hour.precipitation >= PRECIP.moderateMm ? "moderate" : "light";
+		return hour.precipitation >= PRECIP.moderateMm
+			? "moderate"
+			: "light";
 	}
 
 	const SEVERITY_RANK = { light: 1, moderate: 2, heavy: 3 };
@@ -292,7 +351,8 @@
 				hours: run.hours.length,
 				totalMm: run.totalMm,
 				sustained:
-					run.hours.length >= PRECIP.sustainedHours ||
+					run.hours.length >=
+						PRECIP.sustainedHours ||
 					run.severity === "heavy",
 				message: `${prefix} expected ${formatClock(start)}\u2013${formatClock(end)}`,
 			});
@@ -304,7 +364,8 @@
 			const previous = hours[index - 1];
 			const contiguous =
 				previous &&
-				(hourStartMinutes(previous.time) + 60) % 1440 ===
+				(hourStartMinutes(previous.time) + 60) %
+					1440 ===
 					hourStartMinutes(hour.time);
 
 			if (!severity || (run && !contiguous)) {
@@ -324,7 +385,10 @@
 			run.hours.push(hour);
 			run.totalMm += hour.precipitation;
 			run.snow = run.snow || isSnowCode(hour.weatherCode);
-			if (SEVERITY_RANK[severity] > SEVERITY_RANK[run.severity]) {
+			if (
+				SEVERITY_RANK[severity] >
+				SEVERITY_RANK[run.severity]
+			) {
 				run.severity = severity;
 			}
 		});
@@ -345,6 +409,14 @@
 		};
 	}
 
+	function averageOf(values) {
+		const numbers = values.filter(Number.isFinite);
+		return numbers.length
+			? numbers.reduce((total, value) => total + value, 0) /
+					numbers.length
+			: null;
+	}
+
 	function normalizeWeatherResponse(data, hoursKept = HOURS_KEPT) {
 		if (
 			!data ||
@@ -359,14 +431,19 @@
 		const h = data.hourly;
 		const startIndex = Math.max(
 			0,
-			h.time.findIndex((time) => time >= data.current.time.slice(0, 13)),
+			h.time.findIndex(
+				(time) =>
+					time >= data.current.time.slice(0, 13),
+			),
 		);
 
 		const hourly = h.time
 			.slice(startIndex, startIndex + hoursKept)
 			.map((time, offset) => {
 				const index = startIndex + offset;
-				const temperature = toFiniteNumber(h.temperature_2m?.[index]);
+				const temperature = toFiniteNumber(
+					h.temperature_2m?.[index],
+				);
 				return {
 					time,
 					temperature,
@@ -374,12 +451,22 @@
 						h.apparent_temperature?.[index],
 						temperature,
 					),
-					precipitationProbability: toFiniteNumber(
-						h.precipitation_probability?.[index],
+					precipitationProbability:
+						toFiniteNumber(
+							h
+								.precipitation_probability?.[
+								index
+							],
+						),
+					precipitation: toFiniteNumber(
+						h.precipitation?.[index],
 					),
-					precipitation: toFiniteNumber(h.precipitation?.[index]),
-					windSpeed: toFiniteNumber(h.wind_speed_10m?.[index]),
-					weatherCode: toFiniteNumber(h.weather_code?.[index]),
+					windSpeed: toFiniteNumber(
+						h.wind_speed_10m?.[index],
+					),
+					weatherCode: toFiniteNumber(
+						h.weather_code?.[index],
+					),
 				};
 			});
 
@@ -405,6 +492,12 @@
 			},
 			hourly,
 			timezone: data.timezone,
+			weekAverage: averageOf(
+				(h.temperature_2m || []).slice(
+					Math.max(0, startIndex - WEEK_HOURS),
+					startIndex,
+				),
+			),
 		};
 	}
 
@@ -415,13 +508,44 @@
 		Object.keys(DEFAULT_LABELS).forEach((key) => {
 			const value =
 				typeof labels?.[key] === "string"
-					? labels[key].trim().slice(0, LABEL_MAX_LENGTH)
+					? labels[key]
+							.trim()
+							.slice(
+								0,
+								LABEL_MAX_LENGTH,
+							)
 					: "";
 			if (value) {
 				result[key] = value;
 			}
 		});
 		return result;
+	}
+
+	// At least one tier must stay available so a recommendation always exists.
+	function sanitizeAvailable(available) {
+		const result = {};
+		Object.keys(DEFAULT_LABELS).forEach((key) => {
+			result[key] = available?.[key] !== false;
+		});
+		return Object.values(result).some(Boolean)
+			? result
+			: { hoodie: true, jumper: true, shirt: true };
+	}
+
+	function sanitizeComfort(value) {
+		const rating = Math.round(
+			toFiniteNumber(value, COMFORT_DEFAULT),
+		);
+		return clamp(rating, COMFORT_MIN, COMFORT_MAX);
+	}
+
+	// 1 = unbearable in the warmest layer (runs warm), 5 = never leaves without it (runs cold).
+	function comfortToOffset(comfort) {
+		return (
+			(COMFORT_DEFAULT - sanitizeComfort(comfort)) *
+			COMFORT_DEGREES_PER_STEP
+		);
 	}
 
 	function sanitizeLocation(location) {
@@ -439,7 +563,8 @@
 			latitude,
 			longitude,
 			label:
-				typeof location.label === "string" && location.label
+				typeof location.label === "string" &&
+				location.label
 					? location.label.slice(0, 80)
 					: "Saved location",
 		};
@@ -447,15 +572,21 @@
 
 	function sanitizeSettings(raw) {
 		const source = raw && typeof raw === "object" ? raw : {};
-		const clock = (value) => (parseClock(value) === null ? "" : value);
+		const clock = (value) =>
+			parseClock(value) === null ? "" : value;
 		return {
-			exposure: source.exposure in EXPOSURE_PROFILES ? source.exposure : "transit",
+			exposure:
+				source.exposure in EXPOSURE_PROFILES
+					? source.exposure
+					: "short",
 			thermalOffset: clamp(
 				toFiniteNumber(source.thermalOffset),
 				-THERMAL_OFFSET_LIMIT,
 				THERMAL_OFFSET_LIMIT,
 			),
 			labels: sanitizeLabels(source.labels),
+			comfort: sanitizeComfort(source.comfort),
+			available: sanitizeAvailable(source.available),
 			outWindow: {
 				start: clock(source.outWindow?.start),
 				end: clock(source.outWindow?.end),
@@ -520,7 +651,9 @@
 
 	function loadSettings(storage) {
 		try {
-			return sanitizeSettings(JSON.parse(storage.getItem(SETTINGS_KEY)));
+			return sanitizeSettings(
+				JSON.parse(storage.getItem(SETTINGS_KEY)),
+			);
 		} catch {
 			return sanitizeSettings(null);
 		}
@@ -539,13 +672,19 @@
 	function saveWeatherCache(storage, location, weather, fetchedAt) {
 		storage.setItem(
 			WEATHER_CACHE_KEY,
-			JSON.stringify({ key: locationKey(location), fetchedAt, weather }),
+			JSON.stringify({
+				key: locationKey(location),
+				fetchedAt,
+				weather,
+			}),
 		);
 	}
 
 	function loadWeatherCache(storage, location) {
 		try {
-			const entry = JSON.parse(storage.getItem(WEATHER_CACHE_KEY));
+			const entry = JSON.parse(
+				storage.getItem(WEATHER_CACHE_KEY),
+			);
 			if (
 				entry &&
 				entry.key === locationKey(location) &&
@@ -607,6 +746,8 @@
 		loadWeatherCache,
 		normalizeWeatherResponse,
 		sanitizeLabels,
+		sanitizeComfort,
+		comfortToOffset,
 		sanitizeSettings,
 		saveSettings,
 		saveWeatherCache,

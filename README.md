@@ -12,6 +12,10 @@ All you need to do to use the app is give it your current location (exact same a
 - Responsive design for mobile and desktop devices
 - PWA (Progressive Web App) capabilities for offline access and installation on devices
 
+## Artwork Attribution
+
+Seasonal illustrations use Twemoji SVGs by Twitter and contributors, bundled locally from the [Twemoji project](https://github.com/jdecked/twemoji). The graphics are licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
 ## FAQ
 
 - **What is the purpose of this app?**

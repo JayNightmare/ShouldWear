@@ -1284,7 +1284,10 @@ function bindEvents() {
 		}
 	});
 	elements.useDeviceLocationButton.addEventListener("click", () => {
-		closeLocationMenu();
+		setText(
+			elements.locationSearchStatus,
+			"Finding your location...",
+		);
 		requestDeviceLocation();
 	});
 	document.addEventListener("click", (event) => {

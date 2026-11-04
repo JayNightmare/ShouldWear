@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_VERSION = "v16";
+const CACHE_VERSION = "v17";
 const STATIC_CACHE = `shouldwear-static-${CACHE_VERSION}`;
 const API_CACHE = `shouldwear-api-${CACHE_VERSION}`;
 const CURRENT_CACHES = new Set([STATIC_CACHE, API_CACHE]);
@@ -32,7 +32,14 @@ self.addEventListener("install", (event) => {
 	event.waitUntil(
 		caches
 			.open(STATIC_CACHE)
-			.then((cache) => cache.addAll(APP_SHELL))
+			// One missing file must not abort the whole install.
+			.then((cache) =>
+				Promise.allSettled(
+					APP_SHELL.map((path) =>
+						cache.add(path),
+					),
+				),
+			)
 			.then(() => self.skipWaiting()),
 	);
 });
@@ -127,25 +134,22 @@ async function networkFirst(request) {
 	}
 }
 
-async function cacheFirst(request) {
-	const cachedResponse = await caches.match(request);
-	if (cachedResponse) {
-		return cachedResponse;
-	}
-
+// Network first so deployed updates show immediately; the cache only serves offline.
+async function staticNetworkFirst(request) {
+	const cache = await caches.open(STATIC_CACHE);
 	try {
-		const response = await fetch(request);
-		if (response.ok || response.type === "opaque") {
-			const cache = await caches.open(STATIC_CACHE);
+		const response = await fetch(request, { cache: "no-cache" });
+		if (response.ok) {
 			await cache.put(request, response.clone());
 		}
 		return response;
 	} catch (error) {
-		if (request.mode === "navigate") {
-			const fallback = await caches.match("./index.html");
-			if (fallback) {
-				return fallback;
-			}
+		const cachedResponse =
+			(await cache.match(request, { ignoreSearch: true })) ||
+			(request.mode === "navigate" &&
+				(await cache.match("./index.html")));
+		if (cachedResponse) {
+			return cachedResponse;
 		}
 		throw error;
 	}
@@ -164,6 +168,6 @@ self.addEventListener("fetch", (event) => {
 	}
 
 	if (url.origin === self.location.origin) {
-		event.respondWith(cacheFirst(event.request));
+		event.respondWith(staticNetworkFirst(event.request));
 	}
 });

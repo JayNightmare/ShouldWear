@@ -250,6 +250,7 @@ function getScoringOptions() {
 	return {
 		forecastHours: state.forecastHours,
 		exposure: isLongTrip() ? "long" : "short",
+		activity: settings.activity,
 		thermalOffset: comfortToOffset(settings.comfort),
 		labels: settings.labels,
 		available: settings.available,
@@ -304,17 +305,68 @@ function getRecommendationReason(hours, rainRisk, alerts, layers = 0) {
 	return `Conditions stay fairly steady for ${windowLabel}.`;
 }
 
+function animateTierExpansion(details, summary, content) {
+	let animation = null;
+	let closing = false;
+	summary.addEventListener("click", (event) => {
+		event.preventDefault();
+		const opening = !details.open || closing;
+		const startHeight = details.getBoundingClientRect().height;
+		if (animation) {
+			animation.cancel();
+			animation = null;
+		}
+		closing = !opening;
+		summary.setAttribute("aria-expanded", String(opening));
+		content.inert = !opening;
+		details.toggleAttribute("data-closing", closing);
+
+		if (
+			window.matchMedia("(prefers-reduced-motion: reduce)").matches ||
+			typeof details.animate !== "function"
+		) {
+			details.open = opening;
+			details.removeAttribute("data-closing");
+			details.removeAttribute("data-animating");
+			details.style.removeProperty("height");
+			return;
+		}
+
+		details.open = true;
+		const endHeight = summary.offsetHeight + (opening ? content.offsetHeight : 0);
+		details.style.height = `${startHeight}px`;
+		details.setAttribute("data-animating", "");
+		animation = details.animate(
+			[{ height: `${startHeight}px` }, { height: `${endHeight}px` }],
+			{ duration: 300, easing: "cubic-bezier(0.22, 1, 0.36, 1)" },
+		);
+		animation.onfinish = () => {
+			details.open = opening;
+			details.removeAttribute("data-closing");
+			details.removeAttribute("data-animating");
+			details.style.removeProperty("height");
+			animation = null;
+		};
+	});
+}
+
 function createTierRefs(tier) {
 	const root = document.createElement("article");
 	root.className = "tier-item";
 	root.dataset.tier = tier.id;
 
+	const details = document.createElement("details");
+	const summary = document.createElement("summary");
+	summary.className = "tier-summary";
 	const heading = document.createElement("div");
 	heading.className = "tier-heading";
 	const name = document.createElement("h3");
 	const value = document.createElement("span");
 	value.className = "tier-value mono";
-	heading.append(name, value);
+	const indicator = document.createElement("span");
+	indicator.className = "tier-indicator";
+	indicator.setAttribute("aria-hidden", "true");
+	heading.append(name, value, indicator);
 
 	const wrap = document.createElement("div");
 	wrap.className = "bar-wrap";
@@ -329,20 +381,60 @@ function createTierRefs(tier) {
 	bar.append(fill);
 	wrap.append(bar);
 
-	root.append(heading, wrap);
-	return { root, name, value, wrap, bar };
+	summary.append(heading, wrap);
+	const explanation = document.createElement("div");
+	explanation.className = "tier-explanation";
+	const lists = document.createElement("div");
+	lists.className = "tier-lists";
+	const pros = document.createElement("section");
+	const cons = document.createElement("section");
+	for (const [section, title] of [[pros, "Pros"], [cons, "Cons"]]) {
+		const heading = document.createElement("h4");
+		heading.textContent = title;
+		section.append(heading, document.createElement("ul"));
+	}
+	lists.append(pros, cons);
+	const reason = document.createElement("section");
+	const reasonHeading = document.createElement("h4");
+	reasonHeading.textContent = "Why";
+	const reasonText = document.createElement("p");
+	reason.append(reasonHeading, reasonText);
+	explanation.append(lists, reason);
+	details.append(summary, explanation);
+	animateTierExpansion(details, summary, explanation);
+	root.append(details);
+	return { root, name, value, wrap, bar, pros, cons, reasonText };
 }
 
-function updateTier(refs, tier, isTop) {
+function updateTier(refs, tier, topTier, scores, hours) {
 	setTierName(refs.name, tier);
 	setText(refs.value, `${tier.score}%`);
-	refs.root.classList.toggle("tier-item--recommended", isTop);
+	refs.root.classList.toggle("tier-item--recommended", tier.id === topTier.id);
 	refs.bar.setAttribute("aria-label", `${tier.label} acceptance`);
 	refs.bar.setAttribute("aria-valuenow", String(tier.score));
 	refs.wrap.style.setProperty("--score", `${tier.score}%`);
+	for (const [section, items] of [[refs.pros, tier.pros], [refs.cons, tier.cons]]) {
+		section.hidden = items.length === 0;
+		section.querySelector("ul").replaceChildren(...items.map((text) => {
+			const item = document.createElement("li");
+			item.textContent = text;
+			return item;
+		}));
+	}
+	const comparison = scores.length === 1
+		? "It is your only available option."
+		: tier.id === topTier.id
+			? scores.some((other) => other.id !== tier.id && other.score === tier.score)
+				? "It shares the highest score; the warmer option wins ties."
+				: "It has the highest score of your available options."
+			: tier.score === topTier.score
+				? "It shares the highest score; the warmer option wins ties."
+				: `${topTier.label} scores higher.`;
+	const weighting = hours.length > 3 ? ", with earlier hours weighted more heavily" : "";
+	setText(refs.reasonText, `${tier.score}% suitability over ${formatForecastWindow(hours.length)}${weighting}. The score uses feels-like temperatures adjusted for activity and comfort, plus rain risk. ${comparison}`);
 }
 
-function renderTiers(scores, topTier) {
+function renderTiers(scores, topTier, hours) {
 	if (
 		tierRefs.size !== scores.length ||
 		scores.some((tier) => !tierRefs.has(tier.id))
@@ -356,27 +448,9 @@ function renderTiers(scores, topTier) {
 		elements.tierList.replaceChildren(
 			...created.map((refs) => refs.root),
 		);
-		// Bars start at 0 and grow on the next frames so the CSS transition runs.
-		window.requestAnimationFrame(() =>
-			window.requestAnimationFrame(() =>
-				scores.forEach((tier) =>
-					updateTier(
-						tierRefs.get(tier.id),
-						tier,
-						tier.id === topTier.id,
-					),
-				),
-			),
-		);
-		scores.forEach((tier) => {
-			const refs = tierRefs.get(tier.id);
-			setTierName(refs.name, tier);
-			setText(refs.value, `${tier.score}%`);
-		});
-		return;
 	}
 	scores.forEach((tier) =>
-		updateTier(tierRefs.get(tier.id), tier, tier.id === topTier.id),
+		updateTier(tierRefs.get(tier.id), tier, topTier, scores, hours),
 	);
 }
 
@@ -468,10 +542,9 @@ function renderRecommendation() {
 
 	elements.forecastHours.value = String(state.forecastHours);
 
-	renderTiers(scores, topTier);
+	renderTiers(scores, topTier, hours);
 	renderAlerts(alerts);
 	updateForecastWindowMarks(hours);
-	updateStepperSummary();
 
 	if (
 		!previousTop ||
@@ -954,6 +1027,9 @@ function syncSettingsControls() {
 	elements.exposureInputs.forEach((input) => {
 		input.checked = (input.value === "long") === isLongTrip();
 	});
+	elements.activityInputs.forEach((input) => {
+		input.checked = input.value === settings.activity;
+	});
 	elements.forecastHours.value = String(state.forecastHours);
 	elements.comfortInputs.forEach((input) => {
 		input.checked = Number(input.value) === settings.comfort;
@@ -970,7 +1046,6 @@ function syncSettingsControls() {
 	elements.availableInputs.forEach((input) => {
 		input.checked = settings.available[input.dataset.available];
 	});
-	updateStepperSummary();
 }
 
 let recomputeScheduled = false;
@@ -1011,6 +1086,12 @@ function handleComfortChange(event) {
 	scheduleRecommendation();
 }
 
+function handleActivityChange(event) {
+	state.settings.activity = sanitizeSettings({ activity: event.target.value }).activity;
+	persistSettings();
+	scheduleRecommendation();
+}
+
 function handleLabelInput() {
 	const labels = { ...DEFAULT_LABELS };
 	elements.labelInputs.forEach((input) => {
@@ -1026,6 +1107,7 @@ function handleResetSettings() {
 	const defaults = sanitizeSettings(null);
 	Object.assign(state.settings, {
 		comfort: defaults.comfort,
+		activity: defaults.activity,
 		labels: defaults.labels,
 		available: defaults.available,
 	});
@@ -1048,22 +1130,11 @@ function handleAvailableChange() {
 
 /* ---------- personalisation stepper ---------- */
 
-const STEP_COUNT = 3;
 let currentStep = 0;
-
-function updateStepperSummary() {
-	const { settings } = state;
-	const parts = [];
-	parts.push(`Trip: ${isLongTrip() ? "Long" : "Short"}`);
-	parts.push(
-		`Clothes: ${Object.values(settings.available).filter(Boolean).length}`,
-	);
-	parts.push(`Comfort: ${COMFORT_DESCRIPTIONS[settings.comfort]}`);
-	setText(elements.stepperSummaryText, parts.join(" \u00B7 "));
-}
+let activityQuestion = 0;
 
 function showStep(index, { focus = false } = {}) {
-	currentStep = Math.min(Math.max(index, 0), STEP_COUNT - 1);
+	currentStep = Math.min(Math.max(index, 0), elements.steps.length - 1);
 	elements.steps.forEach((step, stepIndex) => {
 		step.hidden = stepIndex !== currentStep;
 	});
@@ -1074,45 +1145,24 @@ function showStep(index, { focus = false } = {}) {
 			button.removeAttribute("aria-current");
 		}
 	});
-	elements.stepBack.hidden = currentStep === 0;
-	setText(
-		elements.stepNext,
-		currentStep === STEP_COUNT - 1 ? "Done" : "Next",
-	);
+	elements.activityQuestions.forEach((question, questionIndex) => {
+		question.hidden = questionIndex !== activityQuestion;
+	});
+	elements.stepBack.hidden = currentStep !== 0 || activityQuestion === 0;
+	elements.stepNext.hidden = currentStep !== 0 || activityQuestion === elements.activityQuestions.length - 1;
 	if (focus) {
-		elements.steps[currentStep].querySelector("input")?.focus();
-	}
-}
-
-function setStepperOpen(open) {
-	if (!open && elements.stepperBody.contains(document.activeElement)) {
-		elements.stepperEdit.focus();
-	}
-	elements.stepper.dataset.open = String(open);
-	elements.stepperBody.inert = !open;
-	elements.stepperEdit.setAttribute("aria-expanded", String(open));
-	setText(elements.stepperEdit, open ? "Close" : "Expand");
-	if (open) {
-		showStep(0, { focus: true });
+		const panel = currentStep === 0
+			? elements.activityQuestions[activityQuestion]
+			: elements.steps[currentStep];
+		(panel.querySelector("input:checked") || panel.querySelector("input"))?.focus();
 	}
 }
 
 function handleStepSubmit(event) {
 	event.preventDefault();
-	if (currentStep < STEP_COUNT - 1) {
-		showStep(currentStep + 1, { focus: true });
-	} else {
-		setStepperOpen(false);
-	}
-}
-
-function handleStepperKeydown(event) {
-	if (
-		event.key === "Escape" &&
-		elements.stepper.dataset.open === "true"
-	) {
-		event.stopPropagation();
-		setStepperOpen(false);
+	if (currentStep === 0 && activityQuestion < elements.activityQuestions.length - 1) {
+		activityQuestion += 1;
+		showStep(currentStep, { focus: true });
 	}
 }
 
@@ -1182,10 +1232,9 @@ function cacheDomElements() {
 		bestNextEyebrow: $("#best-next-eyebrow"),
 		availableInputs: document.querySelectorAll("[data-available]"),
 		stepper: $("#personalise"),
-		stepperBody: $("#stepper-body"),
-		stepperEdit: $("#stepper-edit"),
-		stepperSummaryText: $("#stepper-summary-text"),
-		steps: document.querySelectorAll(".step"),
+		steps: document.querySelectorAll("[data-step]"),
+		activityQuestions: document.querySelectorAll("[data-activity-question]"),
+		activityInputs: document.querySelectorAll('input[name="activity"]'),
 		stepButtons: document.querySelectorAll("[data-step-target]"),
 		stepBack: $("#step-back"),
 		stepNext: $("#step-next"),
@@ -1250,6 +1299,9 @@ function bindEvents() {
 	elements.exposureInputs.forEach((input) =>
 		input.addEventListener("change", handleExposureChange),
 	);
+	elements.activityInputs.forEach((input) =>
+		input.addEventListener("change", handleActivityChange),
+	);
 	elements.comfortInputs.forEach((input) =>
 		input.addEventListener("change", handleComfortChange),
 	);
@@ -1261,13 +1313,12 @@ function bindEvents() {
 		input.addEventListener("change", handleAvailableChange),
 	);
 	elements.stepper.addEventListener("submit", handleStepSubmit);
-	elements.stepper.addEventListener("keydown", handleStepperKeydown);
-	elements.stepperEdit.addEventListener("click", () =>
-		setStepperOpen(elements.stepper.dataset.open !== "true"),
-	);
-	elements.stepBack.addEventListener("click", () =>
-		showStep(currentStep - 1, { focus: true }),
-	);
+	elements.stepBack.addEventListener("click", () => {
+		if (currentStep === 0 && activityQuestion > 0) {
+			activityQuestion -= 1;
+			showStep(currentStep, { focus: true });
+		}
+	});
 	elements.stepButtons.forEach((button) =>
 		button.addEventListener("click", () =>
 			showStep(Number(button.dataset.stepTarget), {

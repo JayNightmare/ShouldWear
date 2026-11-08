@@ -88,6 +88,8 @@
 		long: { chillWeight: 1.6, restingOffset: -1.5 },
 	};
 
+	const ACTIVITY_OFFSETS = { resting: -2, walking: 0, vigorous: 2 };
+
 	const PRECIP = {
 		wetMm: 0.2,
 		wetProbability: 40,
@@ -98,6 +100,7 @@
 
 	const DEFAULT_SETTINGS = {
 		exposure: "short",
+		activity: "walking",
 		thermalOffset: 0,
 		comfort: 3,
 		labels: { ...DEFAULT_LABELS },
@@ -155,6 +158,9 @@
 	function getEffectiveTemperature(hour, options = {}) {
 		const profile = getExposureProfile(options.exposure);
 		const offset = toFiniteNumber(options.thermalOffset);
+		const activityOffset = Object.hasOwn(ACTIVITY_OFFSETS, options.activity)
+			? ACTIVITY_OFFSETS[options.activity]
+			: ACTIVITY_OFFSETS.walking;
 		const chill = hour.feelsLike - hour.temperature;
 		const adjustedChill =
 			chill < 0 ? chill * profile.chillWeight : chill;
@@ -162,7 +168,8 @@
 			hour.temperature +
 			adjustedChill +
 			profile.restingOffset +
-			offset
+			offset +
+			activityOffset
 		);
 	}
 
@@ -248,8 +255,13 @@
 			const plateauStart = tier.curve.find(
 				([, value]) => value === 100,
 			)[0];
+			const plateauEnd = tier.curve.filter(([, value]) => value === 100).at(-1)[0];
 			let weighted = 0;
 			let totalWeight = 0;
+			let ideal = false;
+			let cold = false;
+			let warm = false;
+			let rainReducedScore = false;
 			effective.forEach((temperature, index) => {
 				const weight = getHourWeight(index);
 				let score =
@@ -257,29 +269,53 @@
 					temperature < plateauStart
 						? 100
 						: interpolateScore(temperature, tier.curve);
+				ideal ||= score === 100 && temperature >= plateauStart;
+				cold ||= score < 100 && temperature < plateauStart;
+				warm ||= score < 100 && temperature > plateauEnd;
 				if (rainRisk) {
+					rainReducedScore ||= tier.rainPenalty > 0 && score > 0;
 					score -= tier.rainPenalty;
 				}
 				weighted += clamp(score) * weight;
 				totalWeight += weight;
 			});
+			const layers =
+				tier.id === warmestId
+					? Math.round(
+							clamp(
+								(plateauStart - averageEffective) /
+									LAYER_STEP_DEGREES,
+								0,
+								MAX_EXTRA_LAYERS,
+							),
+						)
+					: 0;
+			const pros = [];
+			const cons = [];
+			if (ideal) {
+				pros.push("Some hours fall within this item's ideal temperature range.");
+			}
+			if (cold) {
+				cons.push("Some hours may feel too cold for this item.");
+			}
+			if (warm) {
+				cons.push("Some hours may feel too warm for this item.");
+			}
+			if (layers > 0) {
+				cons.push(`Needs ${layers} extra layer${layers === 1 ? "" : "s"} underneath for the cold.`);
+			}
+			if (rainReducedScore) {
+				cons.push("Rain risk reduces this item's score.");
+			}
 			return {
 				...tier,
 				label: labels[tier.id],
 				score: Math.round(
 					clamp(weighted / totalWeight),
 				),
-				layers:
-					tier.id === warmestId
-						? Math.round(
-								clamp(
-									(plateauStart - averageEffective) /
-										LAYER_STEP_DEGREES,
-									0,
-									MAX_EXTRA_LAYERS,
-								),
-							)
-						: 0,
+				layers,
+				pros,
+				cons,
 			};
 		});
 
@@ -579,6 +615,9 @@
 				source.exposure in EXPOSURE_PROFILES
 					? source.exposure
 					: "short",
+			activity: Object.hasOwn(ACTIVITY_OFFSETS, source.activity)
+				? source.activity
+				: "walking",
 			thermalOffset: clamp(
 				toFiniteNumber(source.thermalOffset),
 				-THERMAL_OFFSET_LIMIT,

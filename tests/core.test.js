@@ -44,6 +44,37 @@ test("scoring keeps tier ids and picks the right tier", () => {
 	assert.equal(core.selectTopTier(result.scores).id, "jumper");
 });
 
+test("recommendation factors follow the same temperatures and rain penalties as scoring", () => {
+	const temperate = core.calculateTierScores(day(), { forecastHours: 4 });
+	const hoodie = temperate.scores.find((tier) => tier.id === "hoodie");
+	const jumper = temperate.scores.find((tier) => tier.id === "jumper");
+	const shirt = temperate.scores.find((tier) => tier.id === "shirt");
+	assert.match(hoodie.cons.join(" "), /too warm/);
+	assert.match(jumper.pros.join(" "), /ideal temperature/);
+	assert.deepEqual(jumper.cons, []);
+	assert.match(shirt.cons.join(" "), /too cold/);
+
+	const wet = core.calculateTierScores(
+		day(() => ({ precipitationProbability: 80 })),
+		{ forecastHours: 4 },
+	);
+	assert.doesNotMatch(wet.scores[0].cons.join(" "), /rain/i);
+	assert.match(wet.scores[1].cons.join(" "), /rain risk/i);
+	assert.equal(wet.scores[1].score, jumper.score - 10);
+});
+
+test("recommendation factors include cold-weather layers without a false cold penalty", () => {
+	const cold = core.calculateTierScores(
+		day(() => ({ temperature: 0, feelsLike: 0 })),
+		{ forecastHours: 1, available: { hoodie: false, jumper: true, shirt: true } },
+	);
+	const jumper = cold.scores.find((tier) => tier.id === "jumper");
+	assert.equal(jumper.score, 100);
+	assert.match(jumper.cons.join(" "), /3 extra layers/);
+	assert.doesNotMatch(jumper.cons.join(" "), /too cold/);
+	assert.deepEqual(jumper.pros, []);
+});
+
 test("wind speed is not scored separately (no double-counted chill)", () => {
 	const calm = day(() => ({
 		temperature: 10,
@@ -89,6 +120,24 @@ test("exposure does not amplify positive apparent difference", () => {
 		core.getEffectiveTemperature(h, { exposure: "long" }),
 		26.5,
 	);
+});
+
+test("activity intensity shifts effective temperature and scores without changing weather", () => {
+	const data = day(() => ({ temperature: 16, feelsLike: 16 }));
+	const original = JSON.stringify(data);
+	const base = core.calculateTierScores(data, { exposure: "long", thermalOffset: -1 });
+	for (const [activity, offset] of [["resting", -2], ["walking", 0], ["vigorous", 2]]) {
+		assert.equal(
+			core.getEffectiveTemperature(data[0], { exposure: "long", thermalOffset: -1, activity }),
+			core.getEffectiveTemperature(data[0], { exposure: "long", thermalOffset: -1 }) + offset,
+		);
+	}
+	const resting = core.calculateTierScores(data, { exposure: "long", thermalOffset: -1, activity: "resting" });
+	const vigorous = core.calculateTierScores(data, { exposure: "long", thermalOffset: -1, activity: "vigorous" });
+	assert.ok(scoreOf(resting, "shirt") < scoreOf(base, "shirt"));
+	assert.ok(scoreOf(vigorous, "shirt") > scoreOf(base, "shirt"));
+	assert.equal(JSON.stringify(data), original);
+	assert.equal(core.getEffectiveTemperature(data[0], { activity: "invalid" }), 16);
 });
 
 test("thermal offset shifts scoring inputs only", () => {
@@ -326,6 +375,7 @@ test("settings sanitise bad input", () => {
 		location: { latitude: 500, longitude: 0 },
 	});
 	assert.equal(s.exposure, "short");
+	assert.equal(s.activity, "walking");
 	assert.equal(s.thermalOffset, 5);
 	assert.equal(s.labels.hoodie.length, 24);
 	assert.equal(s.labels.jumper, "Light Jumper");
@@ -349,6 +399,7 @@ test("settings persist across reloads", () => {
 		core.createStorage(() => backend),
 		{
 			exposure: "long",
+			activity: "vigorous",
 			thermalOffset: -2.5,
 			labels: { hoodie: "Parka" },
 			geoPreference: "granted",
@@ -356,6 +407,7 @@ test("settings persist across reloads", () => {
 	);
 	const loaded = core.loadSettings(core.createStorage(() => backend));
 	assert.equal(loaded.exposure, "long");
+	assert.equal(loaded.activity, "vigorous");
 	assert.equal(loaded.thermalOffset, -2.5);
 	assert.equal(loaded.labels.hoodie, "Parka");
 	assert.equal(loaded.geoPreference, "granted");

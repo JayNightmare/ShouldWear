@@ -8,6 +8,8 @@ All you need to do to use the app is give it your current location (exact same a
 
 - Real-time weather data retrieval using the Open-Meteo API
 - Clothing recommendations based on current weather conditions
+- Expandable recommendations explain their pros, cons, and suitability scores
+- Always-visible personalisation with separate activity, available clothes, and comfort sections
 - Weather forecasts for the day ahead + hourly updates
 - Responsive design for mobile and desktop devices
 - PWA (Progressive Web App) capabilities for offline access and installation on devices
@@ -22,7 +24,7 @@ Seasonal illustrations use Twemoji SVGs by Twitter and contributors, bundled loc
   The app is designed to help users make informed decisions about what to wear based on the current weather conditions in their location.
 
 - **How does the app determine what to wear?**
-  The app uses a combination of current temperature, wind chill, and precipitation probability to provide clothing recommendations. It categorizes clothing into three tiers: Hoodie, Light Jumper, and T-Shirt, with an acceptance bar indicating how suitable each option is.
+  The app scores the forecast's apparent temperature and precipitation risk over your chosen time window, adjusted for your activity and comfort preferences. In Activity, you can set your time outside and activity intensity: resting lowers the effective scoring temperature by 2°C, walking leaves it unchanged, and vigorous activity raises it by 2°C. It categorizes clothing into three tiers: Hoodie, Light Jumper, and T-Shirt, with an acceptance bar indicating how suitable each available option is. Expand a recommendation to see the factors behind its score; earlier forecast hours carry more weight for windows longer than three hours.
 
 - **Is the app free to use?**
   Yes, the app is completely free to use and does not require any subscriptions or payments. However, if you want to support the project, [donations](https://github.com/sponsors/JayNightmare) are welcome.

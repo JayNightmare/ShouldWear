@@ -140,19 +140,11 @@
                     </p>
                 </div>
 
-                <!-- border line -->
                 <hr class="recommendation-divider" aria-hidden="true">
-                </hr>
 
                 <form class="stepper" id="personalise" aria-labelledby="stepper-title" novalidate>
-                    <div class="stepper-summary" id="stepper-summary">
-                        <h2 id="stepper-title" class="visually-hidden">Close</h2>
-                        <p class="mono" id="stepper-summary-text"></p>
-                        <button class="secondary-button" id="stepper-edit" type="button" aria-expanded="false"
-                            aria-controls="stepper-body">Expand</button>
-                    </div>
-
-                    <div class="stepper-body" id="stepper-body" inert>
+                    <h2 id="stepper-title">Personalise your recommendation</h2>
+                    <div class="stepper-body" id="stepper-body">
                         <div class="stepper-inner">
                             <ol class="stepper-progress" id="stepper-progress">
                                 <li><button type="button" data-step-target="0">Activity</button></li>
@@ -160,14 +152,24 @@
                                 <li><button type="button" data-step-target="2">Comfort</button></li>
                             </ol>
 
-                            <fieldset class="step" data-step="0">
-                                <legend>How long are you going to be outside?</legend>
-                                <div class="segmented">
-                                    <label><input type="radio" name="exposure" value="short"
-                                            checked /><span>Short</span></label>
-                                    <label><input type="radio" name="exposure" value="long" /><span>Long</span></label>
-                                </div>
-                            </fieldset>
+                            <div data-step="0">
+                                <fieldset class="step" data-activity-question="0">
+                                    <legend>How long are you going to be outside?</legend>
+                                    <div class="segmented">
+                                        <label><input type="radio" name="exposure" value="short"
+                                                checked /><span>Short</span></label>
+                                        <label><input type="radio" name="exposure" value="long" /><span>Long</span></label>
+                                    </div>
+                                </fieldset>
+                                <fieldset class="step" data-activity-question="1" hidden>
+                                    <legend>How active will you be outside?</legend>
+                                    <div class="segmented">
+                                        <label><input type="radio" name="activity" value="resting" /><span>Resting</span></label>
+                                        <label><input type="radio" name="activity" value="walking" checked /><span>Walking</span></label>
+                                        <label><input type="radio" name="activity" value="vigorous" /><span>Vigorous</span></label>
+                                    </div>
+                                </fieldset>
+                            </div>
 
                             <fieldset class="step" data-step="1" hidden>
                                 <legend>What do you have to wear?</legend>
